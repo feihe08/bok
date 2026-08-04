@@ -1,0 +1,21 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 128 128"
+  role="img"
+  aria-labelledby="title"
+>
+  <title id="title">Bok</title>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#4056D9" />
+  <path
+    d="M54 25h35c8.3 0 15 6.7 15 15v48H91V42.5c0-2.5-2-4.5-4.5-4.5H54V25Z"
+    fill="#6FE7F5"
+  />
+  <path
+    d="M42 35h35c8.3 0 15 6.7 15 15v49H79V52.5c0-2.5-2-4.5-4.5-4.5H42V35Z"
+    fill="#AAB6FF"
+  />
+  <path
+    d="M39 45h29c8.3 0 15 6.7 15 15v47.2c0 4.9-5.5 7.7-9.5 4.9L54 98.5l-19.5 13.6c-4 2.8-9.5-.1-9.5-4.9V59c0-7.7 6.3-14 14-14Z"
+    fill="#FFFFFF"
+  />
+</svg>

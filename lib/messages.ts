@@ -1,0 +1,153 @@
+import type { SavedGroupTaskStatus } from './types';
+
+export type OpenMode = 'tabs' | 'tab-group';
+export type OpenDestination = 'current-window' | 'new-window';
+
+export type SavedPageCommand =
+  | { type: 'bok/remove-tab'; sessionId: string; tabId: string }
+  | {
+      type: 'bok/rename-tab';
+      sessionId: string;
+      groupId: string;
+      tabId: string;
+      title: string;
+    }
+  | { type: 'bok/remove-group'; sessionId: string; groupId: string }
+  | {
+      type: 'bok/rename-group';
+      sessionId: string;
+      groupId: string;
+      title: string;
+    }
+  | {
+      type: 'bok/set-group-archived';
+      sessionId: string;
+      groupId: string;
+      archived: boolean;
+    }
+  | {
+      type: 'bok/set-group-locked';
+      sessionId: string;
+      groupId: string;
+      locked: boolean;
+    }
+  | {
+      type: 'bok/set-group-pinned';
+      sessionId: string;
+      groupId: string;
+      pinned: boolean;
+    }
+  | {
+      type: 'bok/set-group-task-status';
+      sessionId: string;
+      groupId: string;
+      status: SavedGroupTaskStatus | null;
+    }
+  | {
+      type: 'bok/set-tab-task-status';
+      sessionId: string;
+      groupId: string;
+      tabId: string;
+      status: SavedGroupTaskStatus | null;
+    }
+  | {
+      type: 'bok/deduplicate-group';
+      sessionId: string;
+      groupId: string;
+    }
+  | {
+      type: 'bok/open-group';
+      sessionId: string;
+      groupId: string;
+      mode: OpenMode;
+      destination: OpenDestination;
+      tabIds: string[];
+    };
+
+export interface OpenGroupResult {
+  openedTabs: number;
+  mode: OpenMode;
+  destination: OpenDestination;
+  /** True when an already-open task group was focused instead of duplicated. */
+  reusedTaskGroup?: boolean;
+}
+
+export interface DeduplicateGroupResult {
+  removedTabs: number;
+}
+
+export type SavedPageCommandResult =
+  | OpenGroupResult
+  | DeduplicateGroupResult
+  | null;
+
+export type SavedPageResponse =
+  | { ok: true; result: SavedPageCommandResult }
+  | { ok: false; error: string };
+
+const GROUP_TASK_STATUSES = new Set<SavedGroupTaskStatus>([
+  'todo',
+  'doing',
+  'done',
+]);
+
+export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
+  if (typeof value !== 'object' || value === null) return false;
+
+  const command = value as Record<string, unknown>;
+  if (typeof command.sessionId !== 'string') return false;
+
+  switch (command.type) {
+    case 'bok/remove-tab':
+      return typeof command.tabId === 'string';
+    case 'bok/rename-tab':
+      return (
+        hasGroupId(command) &&
+        typeof command.tabId === 'string' &&
+        typeof command.title === 'string'
+      );
+    case 'bok/remove-group':
+    case 'bok/deduplicate-group':
+      return hasGroupId(command);
+    case 'bok/rename-group':
+      return hasGroupId(command) && typeof command.title === 'string';
+    case 'bok/set-group-archived':
+      return hasGroupId(command) && typeof command.archived === 'boolean';
+    case 'bok/set-group-locked':
+      return hasGroupId(command) && typeof command.locked === 'boolean';
+    case 'bok/set-group-pinned':
+      return hasGroupId(command) && typeof command.pinned === 'boolean';
+    case 'bok/set-group-task-status':
+      return (
+        hasGroupId(command) &&
+        (command.status === null ||
+          (typeof command.status === 'string' &&
+            GROUP_TASK_STATUSES.has(command.status as SavedGroupTaskStatus)))
+      );
+    case 'bok/set-tab-task-status':
+      return (
+        hasGroupId(command) &&
+        typeof command.tabId === 'string' &&
+        (command.status === null ||
+          (typeof command.status === 'string' &&
+            GROUP_TASK_STATUSES.has(command.status as SavedGroupTaskStatus)))
+      );
+    case 'bok/open-group':
+      return (
+        hasGroupId(command) &&
+        (command.mode === 'tabs' || command.mode === 'tab-group') &&
+        (command.destination === 'current-window' ||
+          command.destination === 'new-window') &&
+        Array.isArray(command.tabIds) &&
+        command.tabIds.every((tabId) => typeof tabId === 'string')
+      );
+    default:
+      return false;
+  }
+}
+
+function hasGroupId(
+  command: Record<string, unknown>,
+): command is Record<string, unknown> & { groupId: string } {
+  return typeof command.groupId === 'string';
+}
