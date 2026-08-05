@@ -28,16 +28,38 @@ const OPEN_BOK_MENU_ID = 'bok/open';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
 const SAVE_TAB_MENU_ID = 'bok/save-tab';
 const SAVE_GROUP_MENU_ID = 'bok/save-group';
+const PAGE_CONTEXT_MENU_ID = 'bok/page';
+const PAGE_CONTEXTS = [
+  'page',
+  'frame',
+  'selection',
+  'link',
+  'editable',
+  'image',
+  'video',
+  'audio',
+] as const;
 
-const ACTION_CONTEXT_MENUS = [
+const CONTEXT_MENU_COMMANDS = [
   { id: OPEN_BOK_MENU_ID, title: '打开 Bok' },
   { id: SAVE_ALL_MENU_ID, title: '保存全部标签' },
   { id: SAVE_TAB_MENU_ID, title: '保存此标签' },
   { id: SAVE_GROUP_MENU_ID, title: '保存此标签组' },
 ] as const;
-const ACTION_CONTEXT_MENU_IDS = new Set<string>(
-  ACTION_CONTEXT_MENUS.map((item) => item.id),
+const CONTEXT_MENU_COMMAND_IDS = new Set<string>(
+  CONTEXT_MENU_COMMANDS.map((item) => item.id),
 );
+
+function pageContextMenuId(actionMenuId: string): string {
+  return `${PAGE_CONTEXT_MENU_ID}/${actionMenuId.slice('bok/'.length)}`;
+}
+
+function normalizeContextMenuId(menuId: string): string {
+  const pageMenuPrefix = `${PAGE_CONTEXT_MENU_ID}/`;
+  return menuId.startsWith(pageMenuPrefix)
+    ? `bok/${menuId.slice(pageMenuPrefix.length)}`
+    : menuId;
+}
 
 let operationQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
@@ -69,19 +91,33 @@ async function runAutoArchive(): Promise<void> {
   }
 }
 
-async function installActionContextMenus(): Promise<void> {
+async function installContextMenus(): Promise<void> {
   const [activeTab] = await browser.tabs.query({
     active: true,
     lastFocusedWindow: true,
   });
+  const saveGroupEnabled =
+    activeTab?.groupId != null && activeTab.groupId !== -1;
   await browser.contextMenus.removeAll();
-  for (const item of ACTION_CONTEXT_MENUS) {
+  for (const item of CONTEXT_MENU_COMMANDS) {
     browser.contextMenus.create({
       ...item,
       contexts: ['action'],
-      enabled:
-        item.id !== SAVE_GROUP_MENU_ID ||
-        (activeTab?.groupId != null && activeTab.groupId !== -1),
+      enabled: item.id !== SAVE_GROUP_MENU_ID || saveGroupEnabled,
+    });
+  }
+  browser.contextMenus.create({
+    id: PAGE_CONTEXT_MENU_ID,
+    title: 'Bok',
+    contexts: [...PAGE_CONTEXTS],
+  });
+  for (const item of CONTEXT_MENU_COMMANDS) {
+    browser.contextMenus.create({
+      id: pageContextMenuId(item.id),
+      parentId: PAGE_CONTEXT_MENU_ID,
+      title: item.title,
+      contexts: [...PAGE_CONTEXTS],
+      enabled: item.id !== SAVE_GROUP_MENU_ID || saveGroupEnabled,
     });
   }
 }
@@ -91,12 +127,16 @@ async function refreshSaveGroupMenuState(): Promise<void> {
     active: true,
     lastFocusedWindow: true,
   });
-  await browser.contextMenus.update(SAVE_GROUP_MENU_ID, {
-    enabled: activeTab?.groupId != null && activeTab.groupId !== -1,
-  });
+  const enabled = activeTab?.groupId != null && activeTab.groupId !== -1;
+  await Promise.all([
+    browser.contextMenus.update(SAVE_GROUP_MENU_ID, { enabled }),
+    browser.contextMenus.update(pageContextMenuId(SAVE_GROUP_MENU_ID), {
+      enabled,
+    }),
+  ]);
 }
 
-async function executeActionContextMenuCommand(
+async function executeContextMenuCommand(
   menuId: string,
   tab?: { id?: number; windowId?: number },
 ) {
@@ -148,8 +188,8 @@ function scheduleTaskReconcile(): void {
 
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener(() => {
-    void installActionContextMenus().catch((error) => {
-      console.error('[bok] failed to install action context menus', error);
+    void installContextMenus().catch((error) => {
+      console.error('[bok] failed to install context menus', error);
     });
   });
 
@@ -236,18 +276,18 @@ export default defineBackground(() => {
   });
 
   browser.contextMenus.onClicked.addListener((info, tab) => {
-    const menuId = String(info.menuItemId);
-    if (!ACTION_CONTEXT_MENU_IDS.has(menuId)) return;
+    const menuId = normalizeContextMenuId(String(info.menuItemId));
+    if (!CONTEXT_MENU_COMMAND_IDS.has(menuId)) return;
 
-    void enqueueOperation(() => executeActionContextMenuCommand(menuId, tab)).then(
+    void enqueueOperation(() => executeContextMenuCommand(menuId, tab)).then(
       (result) => {
-        console.log('[bok] completed action context menu command', {
+        console.log('[bok] completed context menu command', {
           menuId,
           result,
         });
       },
       (error) => {
-        console.error('[bok] failed action context menu command', {
+        console.error('[bok] failed context menu command', {
           menuId,
           error,
         });

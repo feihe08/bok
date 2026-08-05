@@ -21,7 +21,7 @@ export default defineConfig({
     keepProfileChanges: true,
   },
   manifest: {
-    name: 'bok',
+    name: 'Bok',
     description: 'Save and close the current window tabs in one click.',
     permissions: [
       'tabs',

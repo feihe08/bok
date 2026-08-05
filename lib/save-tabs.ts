@@ -62,7 +62,7 @@ export async function openOrFocusSavedPage(
 
   if (reusable?.id != null) {
     await browser.windows.update(reusable.windowId, { focused: true });
-    await browser.tabs.update(reusable.id, { active: true });
+    await browser.tabs.update(reusable.id, { active: true, pinned: true });
     return;
   }
 
@@ -70,6 +70,7 @@ export async function openOrFocusSavedPage(
     ...(preferredWindowId == null ? {} : { windowId: preferredWindowId }),
     url: savedPageUrl,
     active: true,
+    pinned: true,
   });
   if (created.id != null && created.groupId !== TAB_GROUP_ID_NONE) {
     await browser.tabs.ungroup(created.id);
@@ -216,11 +217,16 @@ async function openSavedPageForSave(
   );
 
   if (reusable?.id != null) {
-    await browser.tabs.update(reusable.id, { active: true });
+    await browser.tabs.update(reusable.id, { active: true, pinned: true });
     await browser.tabs.reload(reusable.id);
     return;
   }
-  const created = await browser.tabs.create({ windowId, url, active: true });
+  const created = await browser.tabs.create({
+    windowId,
+    url,
+    active: true,
+    pinned: true,
+  });
   if (created.id != null && created.groupId !== TAB_GROUP_ID_NONE) {
     await browser.tabs.ungroup(created.id);
   }

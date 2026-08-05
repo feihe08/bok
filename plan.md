@@ -7,7 +7,7 @@
 
 这里我写一下我的设计
 
-bok 页面
+Bok 页面
 
 概念：
 标签：最基本的数据
@@ -18,13 +18,13 @@ bok 页面
 页面交互
 参考 onetabe，两列，左侧是 group name 的快速导航和任务状态的筛选，右侧是具体的 gorup 和标签。标签的样式直接参考 onetab 的实现即可。
 
-bok 设置
+Bok 设置
 可以先不实现，都有默认配置。
 
 尚未处理的问题统一记录在 `docs/remaining-todos.md`，本轮不展开实现。
 
 
-bok plugin icon
+Bok plugin icon
 点击 icon，把当前所有打开的页面和当前浏览器标签组保存，浏览器标签组直接用标签组名称当做 gorup name，其他打开的标签，group name 默认为 x 个标签页，可以改名字，可以转换成浏览器标签组。
 
 数据保存页参考 onetab
