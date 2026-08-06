@@ -46,19 +46,16 @@ export type SavedGroupColor =
 
 export type SavedGroupTaskStatus = TaskStatus;
 
-/**
- * A Chrome tab group captured as a unit. Per requirement.md one project maps to
- * one tab group, so this is the natural unit to sync into a bookmark folder.
- */
+/** One ordered Bok group. `grouped` distinguishes ordinary groups from Chrome tab groups. */
 export interface SavedGroup {
   id: string;
-  /** 标签组名称；未分组的标签用空字符串 */
+  /** 分组名称；普通分组可重名，标签组必须使用唯一的非空名称。 */
   title: string;
-  /** 标签组进入 Bok 的时间。 */
+  /** 分组进入 Bok 的时间。 */
   createdAt: number;
   /** Chrome tab group color, kept so the page can render it like the browser does */
   color?: SavedGroupColor;
-  /** false 表示这些标签本来就没有分组 */
+  /** true 表示标签组：按 Chrome 标签组打开，并参与运行期同步。 */
   grouped: boolean;
   /** 锁定后仍可打开，但不能从 Bok 删除 */
   locked: boolean;

@@ -4,6 +4,7 @@ import type {
   OpenGroupResult,
   OpenMode,
 } from './messages';
+import { getSavedGroupTitle } from './group-names';
 import { getSavedGroup } from './storage';
 import type { SavedTab } from './types';
 
@@ -64,7 +65,7 @@ export async function openSavedGroup(
         createProperties: { windowId },
       });
       await browser.tabGroups.update(browserGroupId, {
-        title: group.title.trim() || `${group.tabs.length} 个标签页`,
+        title: getSavedGroupTitle(group),
         color: group.color ?? 'grey',
       });
     }

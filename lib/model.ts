@@ -30,13 +30,13 @@ export interface Tab {
 export interface TabGroup {
   /** Stable identity of this tab group. */
   id: Id;
-  /** User-visible group title; an empty string means no explicit title. */
+  /** Ordinary groups may share a title; browser-group titles are unique and non-empty. */
   title: string;
   /** Unix timestamp in milliseconds when this tab group was created in Bok. */
   createdAt: number;
   /**
    * Whether this collection represents a native Chrome tab group.
-   * False means Bok grouped tabs that were ungrouped in Chrome.
+   * True also enables runtime synchronization with its opened Chrome group.
    */
   isBrowserGroup: boolean;
   /** Whether destructive operations such as deletion and deduplication are blocked. */

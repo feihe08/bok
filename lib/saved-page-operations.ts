@@ -4,6 +4,7 @@ import type {
 } from './messages';
 import { openSavedGroup } from './restore-tabs';
 import {
+  convertGroupToBrowserGroup,
   deduplicateGroup,
   getSavedGroup,
   removeGroup,
@@ -22,6 +23,8 @@ import {
   focusTaskGroupBinding,
   ignoreMissingTaskGroupTabs,
   ignoreTaskTab,
+  restoreTaskGroupBindings,
+  updateBoundGroupTitle,
 } from './task-group-sync';
 
 export interface SavedPageOperationContext {
@@ -49,9 +52,30 @@ export async function executeSavedPageCommand(
       await removeGroup(command.sessionId, command.groupId);
       await clearTaskGroupBinding(command.sessionId, command.groupId);
       return null;
-    case 'bok/rename-group':
+    case 'bok/convert-group':
+      return convertGroupToBrowserGroup(command.sessionId, command.groupId);
+    case 'bok/rename-group': {
+      const previousGroup = await getSavedGroup(command.sessionId, command.groupId);
       await renameGroup(command.sessionId, command.groupId, command.title);
+      const group = await getSavedGroup(command.sessionId, command.groupId);
+      if (group.grouped) {
+        try {
+          await updateBoundGroupTitle(
+            command.sessionId,
+            command.groupId,
+            group.title,
+          );
+        } catch (error) {
+          await renameGroup(
+            command.sessionId,
+            command.groupId,
+            previousGroup.title,
+          );
+          throw error;
+        }
+      }
       return null;
+    }
     case 'bok/set-group-archived':
       await setGroupArchived(
         command.sessionId,
@@ -66,15 +90,11 @@ export async function executeSavedPageCommand(
       await setGroupPinned(command.sessionId, command.groupId, command.pinned);
       return null;
     case 'bok/set-group-task-status':
-      await setGroupTaskStatus(
+      return setGroupTaskStatus(
         command.sessionId,
         command.groupId,
         command.status,
       );
-      if (command.status === null) {
-        await clearTaskGroupBinding(command.sessionId, command.groupId);
-      }
-      return null;
     case 'bok/set-tab-task-status':
       await setTabTaskStatus(
         command.sessionId,
@@ -98,14 +118,24 @@ export async function executeSavedPageCommand(
         return { removedTabs };
       }
     case 'bok/open-group': {
-      const group = await getSavedGroup(command.sessionId, command.groupId);
-      if (group.taskStatus !== null) {
+      let group = await getSavedGroup(command.sessionId, command.groupId);
+      const convertedGroup =
+        !group.grouped && command.mode === 'tab-group'
+          ? await convertGroupToBrowserGroup(command.sessionId, command.groupId)
+          : undefined;
+      if (convertedGroup) {
+        group = await getSavedGroup(command.sessionId, command.groupId);
+      }
+      if (group.grouped) {
+        await restoreTaskGroupBindings();
+        group = await getSavedGroup(command.sessionId, command.groupId);
         if (await focusTaskGroupBinding(command.sessionId, command.groupId)) {
           return {
             openedTabs: group.tabs.length,
             mode: 'tab-group',
             destination: command.destination,
-            reusedTaskGroup: true,
+            reusedSyncedGroup: true,
+            convertedGroup,
           };
         }
 
@@ -118,7 +148,7 @@ export async function executeSavedPageCommand(
           group.tabs.map((tab) => tab.id),
         );
         if (opened.browserGroupId == null) {
-          throw new Error('打开任务失败：浏览器没有返回标签组 ID，Bok 记录已保留');
+          throw new Error('打开同步标签组失败：浏览器没有返回标签组 ID，Bok 记录已保留');
         }
         await bindOpenedTaskGroup(
           command.sessionId,
@@ -127,7 +157,7 @@ export async function executeSavedPageCommand(
           opened.windowId,
           opened.openedTabIdBySavedTabId,
         );
-        return opened;
+        return { ...opened, convertedGroup };
       }
 
       return openSavedGroup(

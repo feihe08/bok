@@ -1,5 +1,11 @@
 import { browser, type Browser } from 'wxt/browser';
-import { addSession } from './storage';
+import {
+  collectGroupedTitles,
+  getDefaultGroupTitle,
+  normalizeGroupTitle,
+  reserveNumericGroupTitle,
+} from './group-names';
+import { addSession, getSessions } from './storage';
 import {
   finishTaskGroupsSave,
   prepareTaskGroupsForSave,
@@ -21,6 +27,7 @@ export interface SaveResult {
 
 interface SaveSelectionOptions {
   openSavedPage: boolean;
+  scope: 'selection' | 'tab-groups' | 'window';
 }
 
 /**
@@ -30,13 +37,19 @@ interface SaveSelectionOptions {
  */
 export async function saveAndCloseTabs(windowId: number): Promise<SaveResult> {
   const allTabs = await browser.tabs.query({ windowId });
-  return saveAndCloseSelection(windowId, allTabs, { openSavedPage: true });
+  return saveAndCloseSelection(windowId, allTabs, {
+    openSavedPage: true,
+    scope: 'window',
+  });
 }
 
 /** Save and close one tab without touching the other tabs in its window. */
 export async function saveAndCloseTab(tabId: number): Promise<SaveResult> {
   const tab = await browser.tabs.get(tabId);
-  return saveAndCloseSelection(tab.windowId, [tab], { openSavedPage: false });
+  return saveAndCloseSelection(tab.windowId, [tab], {
+    openSavedPage: false,
+    scope: 'selection',
+  });
 }
 
 /** Save and close the Chrome tab group that currently contains this tab. */
@@ -47,7 +60,10 @@ export async function saveAndCloseTabGroup(tabId: number): Promise<SaveResult> {
   }
 
   const tabs = await browser.tabs.query({ groupId: tab.groupId });
-  return saveAndCloseSelection(tab.windowId, tabs, { openSavedPage: false });
+  return saveAndCloseSelection(tab.windowId, tabs, {
+    openSavedPage: false,
+    scope: 'tab-groups',
+  });
 }
 
 /** Open Bok once, or focus the existing Bok tab when it is already open. */
@@ -90,8 +106,10 @@ async function saveAndCloseSelection(
   const capturable = allCapturable.filter(
     (tab) => !preparedTaskGroups.excludedTabIds.has(tab.id),
   );
-  const selectedTabIds = new Set(
-    selectedTabs.flatMap((tab) => (tab.id == null ? [] : [tab.id])),
+  const selectedTabIds = await expandSelectedTabIdsAfterRecovery(
+    windowId,
+    selectedTabs,
+    options.scope,
   );
   const tabsToClose = new Set([
     ...allCapturable.map((tab) => tab.id),
@@ -110,7 +128,13 @@ async function saveAndCloseSelection(
   let groups: SavedGroup[] = [];
   if (capturable.length > 0) {
     const createdAt = Date.now();
-    groups = await buildGroups(capturable, windowId, createdAt);
+    const groupedTitles = collectGroupedTitles(await getSessions());
+    groups = await buildGroups(
+      capturable,
+      windowId,
+      createdAt,
+      groupedTitles,
+    );
     const session: SavedSession = {
       id: crypto.randomUUID(),
       createdAt,
@@ -136,6 +160,37 @@ async function saveAndCloseSelection(
   };
 }
 
+async function expandSelectedTabIdsAfterRecovery(
+  windowId: number,
+  initiallySelectedTabs: Tab[],
+  scope: SaveSelectionOptions['scope'],
+): Promise<Set<number>> {
+  const initialIds = new Set(
+    initiallySelectedTabs.flatMap((tab) => (tab.id == null ? [] : [tab.id])),
+  );
+  if (scope === 'selection') return initialIds;
+
+  const currentTabs = await browser.tabs.query({ windowId });
+  if (scope === 'window') {
+    return new Set(
+      currentTabs.flatMap((tab) => (tab.id == null ? [] : [tab.id])),
+    );
+  }
+
+  const selectedGroupIds = new Set(
+    initiallySelectedTabs.flatMap((tab) =>
+      tab.groupId == null || tab.groupId === TAB_GROUP_ID_NONE ? [] : [tab.groupId],
+    ),
+  );
+  return new Set(
+    currentTabs.flatMap((tab) =>
+      tab.id != null && tab.groupId != null && selectedGroupIds.has(tab.groupId)
+        ? [tab.id]
+        : [],
+    ),
+  );
+}
+
 function toCapturableTab(tab: Tab, savedPageUrl: string): CapturableTab | null {
   const url = tab.pendingUrl || tab.url;
   if (tab.id == null || !url || url === savedPageUrl) return null;
@@ -147,6 +202,7 @@ async function buildGroups(
   tabs: CapturableTab[],
   windowId: number,
   createdAt: number,
+  groupedTitles: Set<string>,
 ): Promise<SavedGroup[]> {
   const chromeGroups = await browser.tabGroups.query({ windowId });
   const metaById = new Map(chromeGroups.map((g) => [g.id, g]));
@@ -163,12 +219,17 @@ async function buildGroups(
   const groups: SavedGroup[] = [];
   for (const [groupId, groupTabs] of buckets) {
     const meta = metaById.get(groupId);
+    const grouped = groupId !== TAB_GROUP_ID_NONE;
+    const requestedTitle =
+      normalizeGroupTitle(meta?.title ?? '') || getDefaultGroupTitle(groupTabs.length);
     groups.push({
       id: crypto.randomUUID(),
-      title: meta?.title ?? UNGROUPED,
+      title: grouped
+        ? reserveNumericGroupTitle(requestedTitle, groupedTitles)
+        : UNGROUPED,
       createdAt,
       color: meta?.color,
-      grouped: groupId !== TAB_GROUP_ID_NONE,
+      grouped,
       locked: false,
       pinned: false,
       archivedAt: null,

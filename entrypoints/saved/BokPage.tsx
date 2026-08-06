@@ -705,7 +705,7 @@ export default function BokPage() {
     const group = groups.find((candidate) => candidate.id === groupId);
     if (!group) return;
     if (group.locked) {
-      setActionNotice({ type: 'error', message: '标签组已锁定，无法去重。' });
+      setActionNotice({ type: 'error', message: '分组已锁定，无法去重。' });
       return;
     }
     if (
@@ -730,6 +730,34 @@ export default function BokPage() {
     } catch (error) {
       showCommandError('按完整 URL 去重', error);
     } finally {
+      focusMenuTrigger(group.id);
+    }
+  }
+
+  async function convertGroup(group: ManagedGroup) {
+    if (changingGroupId || group.isBrowserGroup) return;
+    closeGroupMenu();
+    setChangingGroupId(group.id);
+
+    try {
+      const result = await runCommand({
+        type: 'bok/convert-group',
+        sessionId: group.sessionId,
+        groupId: group.id,
+      });
+      if (!result || !('groupTitle' in result)) {
+        throw new Error('后台没有返回转换结果');
+      }
+      setActionNotice({
+        type: 'success',
+        message: result.renamed
+          ? `名称重复，已重命名为“${result.groupTitle}”并转换为标签组`
+          : '已转换为标签组',
+      });
+    } catch (error) {
+      showCommandError('转换为标签组', error);
+    } finally {
+      setChangingGroupId('');
       focusMenuTrigger(group.id);
     }
   }
@@ -779,7 +807,7 @@ export default function BokPage() {
           : '已恢复到当前视图',
       });
     } catch (error) {
-      showCommandError(archiving ? '归档标签组' : '恢复标签组', error);
+      showCommandError(archiving ? '归档分组' : '恢复分组', error);
     } finally {
       setChangingGroupId('');
     }
@@ -813,9 +841,9 @@ export default function BokPage() {
         groupId: group.id,
         title,
       });
-      setActionNotice({ type: 'success', message: '标签组名称已更新' });
+      setActionNotice({ type: 'success', message: '分组名称已更新' });
     } catch (error) {
-      showCommandError('重命名标签组', error);
+      showCommandError('重命名分组', error);
     } finally {
       savingGroupTitleIds.current.delete(group.id);
     }
@@ -842,10 +870,10 @@ export default function BokPage() {
       });
       setActionNotice({
         type: 'success',
-        message: group.locked ? '标签组已解锁' : '标签组已锁定，删除和去重已禁用',
+        message: group.locked ? '分组已解锁' : '分组已锁定，删除和去重已禁用',
       });
     } catch (error) {
-      showCommandError(group.locked ? '解锁标签组' : '锁定标签组', error);
+      showCommandError(group.locked ? '解锁分组' : '锁定分组', error);
     } finally {
       setChangingGroupId('');
       focusMenuTrigger(group.id);
@@ -862,14 +890,22 @@ export default function BokPage() {
     setChangingGroupId(group.id);
 
     try {
-      await runCommand({
+      const result = await runCommand({
         type: 'bok/set-group-task-status',
         sessionId: group.sessionId,
         groupId: group.id,
         status,
       });
       const label = status === null ? '已取消任务标记' : `已标记为 ${status === 'todo' ? 'Todo' : status === 'doing' ? 'Doing' : 'Done'}`;
-      setActionNotice({ type: 'success', message: label });
+      const convertedGroup = result && 'groupTitle' in result ? result : undefined;
+      setActionNotice({
+        type: 'success',
+        message: convertedGroup
+          ? convertedGroup.renamed
+            ? `${label}；名称重复，已重命名为“${convertedGroup.groupTitle}”并转换为标签组`
+            : `${label}，并已转换为标签组`
+          : label,
+      });
     } catch (error) {
       showCommandError('更新任务状态', error);
     } finally {
@@ -922,14 +958,14 @@ export default function BokPage() {
   async function deleteGroup(group: ManagedGroup) {
     closeGroupMenu();
     if (group.locked) {
-      setActionNotice({ type: 'error', message: '标签组已锁定，无法删除。' });
+      setActionNotice({ type: 'error', message: '分组已锁定，无法删除。' });
       focusGroupDeleteButton(group.id);
       return;
     }
     const title = getGroupTitle(group);
     if (
       !window.confirm(
-        `从 Bok 保存记录中永久删除整个标签组“${title}”及其中 ${group.tabs.length} 个标签？此操作无法恢复。`,
+        `从 Bok 保存记录中永久删除整个分组“${title}”及其中 ${group.tabs.length} 个标签？此操作无法恢复。`,
       )
     ) {
       focusGroupDeleteButton(group.id);
@@ -942,10 +978,10 @@ export default function BokPage() {
         sessionId: group.sessionId,
         groupId: group.id,
       });
-      setActionNotice({ type: 'success', message: `已删除标签组“${title}”` });
+      setActionNotice({ type: 'success', message: `已删除分组“${title}”` });
       requestAnimationFrame(() => document.getElementById('saved-groups')?.focus());
     } catch (error) {
-      showCommandError('删除标签组', error);
+      showCommandError('删除分组', error);
       focusGroupDeleteButton(group.id);
     }
   }
@@ -980,18 +1016,29 @@ export default function BokPage() {
       const openedTabs = result && 'openedTabs' in result
         ? result.openedTabs
         : storedGroup.tabs.length;
-      const reusedTaskGroup = Boolean(
-        result && 'reusedTaskGroup' in result && result.reusedTaskGroup,
+      const reusedSyncedGroup = Boolean(
+        result && 'reusedSyncedGroup' in result && result.reusedSyncedGroup,
       );
+      const convertedGroup =
+        result && 'convertedGroup' in result ? result.convertedGroup : undefined;
+      const conversionMessage = convertedGroup
+        ? convertedGroup.renamed
+          ? `名称重复，已重命名为“${convertedGroup.groupTitle}”并转换为标签组`
+          : '已转换为标签组'
+        : '';
       setActionNotice({
         type: 'success',
-        message: reusedTaskGroup
-          ? '已切换到打开中的任务标签组，未创建重复标签。'
-          : `已打开 ${openedTabs} 个标签，保存记录仍保留。`,
+        message: convertedGroup
+          ? reusedSyncedGroup
+            ? `${conversionMessage}；已切换到打开中的同步标签组，未创建重复标签。`
+            : `${conversionMessage}，并打开 ${openedTabs} 个标签；保存记录仍保留。`
+          : reusedSyncedGroup
+            ? '已切换到打开中的同步标签组，未创建重复标签。'
+            : `已打开 ${openedTabs} 个标签，保存记录仍保留。`,
         persistent: true,
       });
     } catch (error) {
-      showCommandError('打开标签组', error);
+      showCommandError('打开分组', error);
     } finally {
       setOpeningGroupId('');
       if (restoreMenuFocus) focusMenuTrigger(group.id);
@@ -1111,7 +1158,7 @@ export default function BokPage() {
                         ) : filter.value === 'doing' ? (
                           <span
                             className="sidebar__count sidebar__count--task"
-                            aria-label={`Doing 中：${doingCount.groups} 个标签组，${doingCount.tabs} 个标签`}
+                            aria-label={`Doing 中：${doingCount.groups} 个分组，${doingCount.tabs} 个标签`}
                           >
                             {doingCount.groups} 组 · {doingCount.tabs} 标签
                           </span>
@@ -1124,10 +1171,10 @@ export default function BokPage() {
             </div>
 
             <div className="sidebar__section sidebar__section--groups">
-              <h2>标签组</h2>
+              <h2>分组</h2>
               {visibleGroups.length > 0 && (
                 <label className="group-select">
-                  <span className="sr-only">跳转到标签组</span>
+                  <span className="sr-only">跳转到分组</span>
                   <select
                     value={activeGroupId}
                     onChange={(event) => goToGroup(event.target.value)}
@@ -1155,7 +1202,7 @@ export default function BokPage() {
                           <PinIcon />
                         </span>
                       )}
-                      {(group.isBrowserGroup || group.taskStatus !== null) && <BrowserGroupIcon />}
+                      {group.isBrowserGroup && <BrowserGroupIcon />}
                       <span className="group-nav__title">{getGroupTitle(group)}</span>
                       <span className="sidebar__count">{group.tabs.length}</span>
                     </button>
@@ -1171,7 +1218,7 @@ export default function BokPage() {
             <div>
               <h1>{getContentTitle(archiveView, taskFilter)}</h1>
             </div>
-            <span>{visibleGroups.length} 个标签组</span>
+            <span>{visibleGroups.length} 个分组</span>
           </header>
 
           {loadError ? (
@@ -1196,8 +1243,8 @@ export default function BokPage() {
               <h2>{archiveView === 'archived' ? '还没有归档记录' : '当前视图为空'}</h2>
               <p>
                 {archiveView === 'archived'
-                  ? '归档标签组后，可以在这里打开或恢复。'
-                  : '所有标签组都已归档，可以切换到归档视图查看。'}
+                  ? '归档分组后，可以在这里打开或恢复。'
+                  : '所有分组都已归档，可以切换到归档视图查看。'}
               </p>
               <button
                 type="button"
@@ -1228,9 +1275,11 @@ export default function BokPage() {
                 const collapsed = collapsedGroupIds.has(group.id);
                 const title = getGroupTitle(group);
                 const isTaskGroup = group.taskStatus !== null;
-                const isBrowserGroup = group.isBrowserGroup || isTaskGroup;
-                const openMenuItemCount = isTaskGroup ? 2 : 4;
-                const deduplicateMenuIndex = openMenuItemCount;
+                const isBrowserGroup = group.isBrowserGroup;
+                const openMenuItemCount = isBrowserGroup ? 2 : 4;
+                const convertMenuIndex = openMenuItemCount;
+                const deduplicateMenuIndex =
+                  convertMenuIndex + (isBrowserGroup ? 0 : 1);
                 const lockMenuIndex = deduplicateMenuIndex + 1;
                 const taskMenuStartIndex = lockMenuIndex + 1;
                 const defaultOpenOptions: OpenGroupOptions = {
@@ -1306,7 +1355,7 @@ export default function BokPage() {
                         )}
                         {editingGroupId !== group.id && (
                           <span id={`group-title-hint-${group.id}`} className="sr-only">
-                            点击重命名标签组
+                            点击重命名分组
                           </span>
                         )}
                         {group.title.trim() && <span>{group.tabs.length} 个标签</span>}
@@ -1393,10 +1442,10 @@ export default function BokPage() {
                           className="group-state-button group-delete-button"
                           aria-label={
                             group.locked
-                              ? `标签组已锁定，无法删除：${title}`
-                              : `删除标签组：${title}`
+                              ? `分组已锁定，无法删除：${title}`
+                              : `删除分组：${title}`
                           }
-                          title={group.locked ? '标签组已锁定，无法删除' : '删除标签组'}
+                          title={group.locked ? '分组已锁定，无法删除' : '删除分组'}
                           disabled={Boolean(openingGroupId) || groupChanging || group.locked}
                           ref={(element) => {
                             if (element) groupDeleteButtonRefs.current.set(group.id, element);
@@ -1441,7 +1490,7 @@ export default function BokPage() {
                               aria-label={`${title} 的更多操作`}
                               onKeyDown={(event) => handleMenuKeyDown(event, group.id)}
                             >
-                              {!isTaskGroup && (
+                              {!isBrowserGroup && (
                                 <button
                                   type="button"
                                   role="menuitem"
@@ -1468,7 +1517,7 @@ export default function BokPage() {
                                 type="button"
                                 role="menuitem"
                                 ref={(element) =>
-                                  setMenuItemRef(group.id, isTaskGroup ? 0 : 1, element)
+                                  setMenuItemRef(group.id, isBrowserGroup ? 0 : 1, element)
                                 }
                                 onClick={() =>
                                   void openGroup(
@@ -1486,7 +1535,7 @@ export default function BokPage() {
                                 </svg>
                                 在此窗口以标签组打开
                               </button>
-                              {!isTaskGroup && (
+                              {!isBrowserGroup && (
                                 <button
                                   type="button"
                                   role="menuitem"
@@ -1513,7 +1562,7 @@ export default function BokPage() {
                                 type="button"
                                 role="menuitem"
                                 ref={(element) =>
-                                  setMenuItemRef(group.id, isTaskGroup ? 1 : 3, element)
+                                  setMenuItemRef(group.id, isBrowserGroup ? 1 : 3, element)
                                 }
                                 onClick={() =>
                                   void openGroup(
@@ -1533,6 +1582,22 @@ export default function BokPage() {
                                 在新窗口以标签组打开
                               </button>
                               <div className="group-menu__separator" role="separator" />
+                              {!isBrowserGroup && (
+                                <>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    ref={(element) =>
+                                      setMenuItemRef(group.id, convertMenuIndex, element)
+                                    }
+                                    onClick={() => void convertGroup(group)}
+                                  >
+                                    <BrowserGroupIcon />
+                                    转换为标签组
+                                  </button>
+                                  <div className="group-menu__separator" role="separator" />
+                                </>
+                              )}
                               <button
                                 type="button"
                                 role="menuitem"
@@ -1540,7 +1605,7 @@ export default function BokPage() {
                                   setMenuItemRef(group.id, deduplicateMenuIndex, element)
                                 }
                                 disabled={group.locked}
-                                title={group.locked ? '标签组已锁定，无法去重' : '按完整 URL 去重'}
+                                title={group.locked ? '分组已锁定，无法去重' : '按完整 URL 去重'}
                                 onClick={() => void deduplicateGroup(group.id)}
                               >
                                 <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -1556,7 +1621,7 @@ export default function BokPage() {
                                 onClick={() => void toggleLocked(group)}
                               >
                                 <LockIcon open={group.locked} />
-                                {group.locked ? '解锁标签组' : '锁定标签组'}
+                                {group.locked ? '解锁分组' : '锁定分组'}
                               </button>
                               {group.taskStatus !== null && (
                                 <>

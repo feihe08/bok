@@ -1,5 +1,16 @@
 import { browser, type Browser } from 'wxt/browser';
 import {
+  createGroupMergePlan,
+  hasSufficientTabOverlap,
+  selectUnambiguousRecoveryCandidates,
+  type ScoredRecoveryCandidate,
+} from './group-sync-recovery';
+import {
+  getSavedGroupTitle,
+  type GroupedTitleChange,
+} from './group-names';
+import {
+  getSavedGroup,
   getSessions,
   syncTaskGroupSnapshot,
   type TaskGroupTabSnapshot,
@@ -17,6 +28,7 @@ export interface TaskGroupBinding {
   windowId: number;
   savedTabIdByBrowserTabId: Record<string, string>;
   ignoredBrowserTabIds: number[];
+  pendingBrowserTitle?: string;
 }
 
 export interface PreparedTaskGroupsForSave {
@@ -40,7 +52,9 @@ function isBinding(value: unknown): value is TaskGroupBinding {
     typeof binding.windowId === 'number' &&
     typeof binding.savedTabIdByBrowserTabId === 'object' &&
     binding.savedTabIdByBrowserTabId !== null &&
-    Array.isArray(binding.ignoredBrowserTabIds)
+    Array.isArray(binding.ignoredBrowserTabIds) &&
+    (binding.pendingBrowserTitle === undefined ||
+      typeof binding.pendingBrowserTitle === 'string')
   );
 }
 
@@ -61,7 +75,7 @@ async function setBindings(bindings: StoredBindings): Promise<void> {
 }
 
 function getBrowserGroupTitle(group: SavedGroup): string {
-  return group.title.trim() || `${group.tabs.length} 个标签页`;
+  return getSavedGroupTitle(group);
 }
 
 function toSnapshot(tab: Browser.tabs.Tab, savedTabId?: string): TaskGroupTabSnapshot | null {
@@ -75,6 +89,139 @@ function toSnapshot(tab: Browser.tabs.Tab, savedTabId?: string): TaskGroupTabSna
     title: tab.title?.trim() || url,
     favIconUrl: tab.favIconUrl,
   };
+}
+
+function getRecoveryMergePlan(
+  savedGroup: SavedGroup,
+  browserTabs: Browser.tabs.Tab[],
+) {
+  const browserTabIdentities = browserTabs.flatMap((tab) => {
+    const snapshot = toSnapshot(tab);
+    return snapshot
+      ? [{ id: snapshot.browserTabId, url: snapshot.url }]
+      : [];
+  });
+  return createGroupMergePlan(savedGroup.tabs, browserTabIdentities);
+}
+
+function hasMatchingRecoveryTitle(
+  savedGroup: SavedGroup,
+  browserGroup: Browser.tabGroups.TabGroup,
+): boolean {
+  const browserTitle = (browserGroup.title ?? '').trim();
+  return (
+    browserTitle === savedGroup.title.trim() ||
+    browserTitle === getBrowserGroupTitle(savedGroup).trim()
+  );
+}
+
+async function mergeAndBindRecoveredGroup(
+  sessionId: string,
+  savedGroupId: string,
+  browserGroupId: number,
+): Promise<TaskGroupBinding | null> {
+  const savedGroup = await getSavedGroup(sessionId, savedGroupId);
+  if (!savedGroup.grouped) return null;
+
+  const browserGroup = await browser.tabGroups.get(browserGroupId);
+  const browserTabs = (await browser.tabs.query({ groupId: browserGroupId })).sort(
+    (a, b) => a.index - b.index,
+  );
+  if (!hasMatchingRecoveryTitle(savedGroup, browserGroup)) return null;
+
+  const mergePlan = getRecoveryMergePlan(savedGroup, browserTabs);
+  if (!hasSufficientTabOverlap(mergePlan)) return null;
+
+  const savedTabsById = new Map(savedGroup.tabs.map((tab) => [tab.id, tab]));
+  const preferredSavedTabIdByBrowserTabId = {
+    ...mergePlan.savedTabIdByBrowserTabId,
+  };
+  const createdBrowserTabIds: number[] = [];
+
+  try {
+    for (const savedTabId of mergePlan.unmatchedSavedTabIds) {
+      const savedTab = savedTabsById.get(savedTabId);
+      if (!savedTab) continue;
+      const createdTab = await browser.tabs.create({
+        windowId: browserGroup.windowId,
+        url: savedTab.url,
+        active: false,
+      });
+      if (createdTab.id == null) {
+        throw new Error('浏览器没有返回合并标签页 ID');
+      }
+      createdBrowserTabIds.push(createdTab.id);
+      preferredSavedTabIdByBrowserTabId[String(createdTab.id)] = savedTab.id;
+    }
+
+    if (createdBrowserTabIds.length > 0) {
+      await browser.tabs.group({
+        groupId: browserGroupId,
+        tabIds: createdBrowserTabIds as [number, ...number[]],
+      });
+    }
+
+    const currentBrowserGroup = await browser.tabGroups.get(browserGroupId);
+    const mergedBrowserTabs = (
+      await browser.tabs.query({ groupId: browserGroupId })
+    ).sort((a, b) => a.index - b.index);
+    const snapshots = mergedBrowserTabs.flatMap((tab) => {
+      if (tab.id == null) return [];
+      const savedTabId = preferredSavedTabIdByBrowserTabId[String(tab.id)];
+      const savedTab = savedTabId ? savedTabsById.get(savedTabId) : undefined;
+      const snapshot = toSnapshot(
+        tab,
+        savedTabId,
+      );
+      if (!snapshot) return [];
+      return [
+        savedTab
+          ? {
+              ...snapshot,
+              title: tab.title?.trim() ? snapshot.title : savedTab.title,
+              favIconUrl: snapshot.favIconUrl ?? savedTab.favIconUrl,
+            }
+          : snapshot,
+      ];
+    });
+    const result = await syncTaskGroupSnapshot(
+      sessionId,
+      savedGroupId,
+      snapshots,
+      savedGroup.tabs.map((tab) => tab.id),
+      {
+        color: currentBrowserGroup.color as SavedGroupColor,
+      },
+    );
+    if (!result.active) {
+      if (createdBrowserTabIds.length > 0) {
+        await browser.tabs.remove(createdBrowserTabIds).catch(() => undefined);
+      }
+      return null;
+    }
+    if (
+      result.groupTitle !== undefined &&
+      result.groupTitle !== (currentBrowserGroup.title ?? '')
+    ) {
+      await browser.tabGroups.update(browserGroupId, {
+        title: result.groupTitle,
+      });
+    }
+
+    return {
+      sessionId,
+      savedGroupId,
+      browserGroupId,
+      windowId: currentBrowserGroup.windowId,
+      savedTabIdByBrowserTabId: result.savedTabIdByBrowserTabId,
+      ignoredBrowserTabIds: [],
+    };
+  } catch (error) {
+    if (createdBrowserTabIds.length > 0) {
+      await browser.tabs.remove(createdBrowserTabIds).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 function reverseTabMap(
@@ -116,6 +263,116 @@ export async function clearTaskGroupBinding(
   if (!(key in bindings)) return;
   delete bindings[key];
   await setBindings(bindings);
+}
+
+export async function updateBoundGroupTitle(
+  sessionId: string,
+  savedGroupId: string,
+  title: string,
+  options: { keepPendingOnFailure?: boolean } = {},
+): Promise<void> {
+  const bindings = await getBindings();
+  const key = bindingKey(sessionId, savedGroupId);
+  const binding = bindings[key];
+  if (!binding) return;
+
+  const previousPendingBrowserTitle = binding.pendingBrowserTitle;
+  binding.pendingBrowserTitle = title;
+  await setBindings(bindings);
+
+  try {
+    await browser.tabGroups.update(binding.browserGroupId, { title });
+    delete binding.pendingBrowserTitle;
+    await setBindings(bindings);
+    return;
+  } catch (initialError) {
+    let failure: unknown = initialError;
+    try {
+      const mappedTabIds = Object.keys(binding.savedTabIdByBrowserTabId).map(Number);
+      const matchingGroups = await Promise.all(
+        (await browser.tabGroups.query({})).map(async (group) => ({
+          group,
+          tabIds: new Set(
+            (await browser.tabs.query({ groupId: group.id })).flatMap((tab) =>
+              tab.id == null ? [] : [tab.id],
+            ),
+          ),
+        })),
+      );
+      const candidates = matchingGroups.filter(
+        ({ tabIds }) =>
+          mappedTabIds.length > 0 &&
+          mappedTabIds.every((browserTabId) => tabIds.has(browserTabId)),
+      );
+      if (candidates.length !== 1) throw initialError;
+
+      const resolvedGroup = candidates[0].group;
+      await browser.tabGroups.update(resolvedGroup.id, { title });
+      binding.browserGroupId = resolvedGroup.id;
+      binding.windowId = resolvedGroup.windowId;
+      delete binding.pendingBrowserTitle;
+      await setBindings(bindings);
+      return;
+    } catch (retryError) {
+      failure = retryError;
+    }
+
+    if (!options.keepPendingOnFailure) {
+      if (previousPendingBrowserTitle === undefined) {
+        delete binding.pendingBrowserTitle;
+      } else {
+        binding.pendingBrowserTitle = previousPendingBrowserTitle;
+      }
+      await setBindings(bindings);
+    }
+    const detail = failure instanceof Error ? `：${failure.message}` : '';
+    throw new Error(`无法同步 Chrome 标签组名称${detail}`);
+  }
+}
+
+export async function synchronizeBoundGroupTitles(
+  renamedGroups: GroupedTitleChange[] = [],
+): Promise<
+  Array<{
+    sessionId: string;
+    savedGroupId: string;
+    error: unknown;
+  }>
+> {
+  const bindings = await getBindings();
+  const renamedTitleByBindingKey = new Map(
+    renamedGroups.map((group) => [
+      bindingKey(group.sessionId, group.groupId),
+      group.groupTitle,
+    ]),
+  );
+  const failures: Array<{
+    sessionId: string;
+    savedGroupId: string;
+    error: unknown;
+  }> = [];
+
+  for (const [key, binding] of Object.entries(bindings)) {
+    const title =
+      renamedTitleByBindingKey.get(key) ?? binding.pendingBrowserTitle;
+    if (title === undefined) continue;
+    try {
+      await updateBoundGroupTitle(
+        binding.sessionId,
+        binding.savedGroupId,
+        title,
+        { keepPendingOnFailure: true },
+      );
+    } catch (error) {
+      failures.push({
+        sessionId: binding.sessionId,
+        savedGroupId: binding.savedGroupId,
+        error,
+      });
+    }
+  }
+
+  return failures;
 }
 
 export async function clearTaskGroupBindingsForWindow(windowId: number): Promise<void> {
@@ -209,7 +466,7 @@ export async function focusTaskGroupBinding(
     const group = await browser.tabGroups.get(binding.browserGroupId);
     const tabs = await browser.tabs.query({ groupId: binding.browserGroupId });
     const firstTab = tabs.find((tab) => tab.id != null);
-    if (firstTab?.id == null) throw new Error('任务标签组没有可聚焦的标签页');
+    if (firstTab?.id == null) throw new Error('同步标签组没有可聚焦的标签页');
     await browser.windows.update(group.windowId, { focused: true });
     await browser.tabs.update(firstTab.id, { active: true });
     return true;
@@ -265,12 +522,17 @@ export async function reconcileTaskGroup(browserGroupId: number): Promise<void> 
     const previousIds = Object.entries(binding.savedTabIdByBrowserTabId)
       .filter(([browserTabId]) => !ignoredTabIds.has(Number(browserTabId)))
       .map(([, savedTabId]) => savedTabId);
+    const browserTitle = chromeGroup.title ?? '';
+    const synchronizedTitle = binding.pendingBrowserTitle ?? browserTitle;
     const result = await syncTaskGroupSnapshot(
       binding.sessionId,
       binding.savedGroupId,
       snapshots,
       previousIds,
-      { title: chromeGroup.title ?? '', color: chromeGroup.color as SavedGroupColor },
+      {
+        title: synchronizedTitle,
+        color: chromeGroup.color as SavedGroupColor,
+      },
       () =>
         !removedBrowserGroupIds.has(browserGroupId) &&
         !closingWindowIds.has(chromeGroup.windowId),
@@ -280,6 +542,21 @@ export async function reconcileTaskGroup(browserGroupId: number): Promise<void> 
       delete bindings[key];
       bindingsChanged = true;
       continue;
+    }
+    if (
+      result.groupTitle !== undefined &&
+      result.groupTitle !== browserTitle
+    ) {
+      try {
+        await browser.tabGroups.update(browserGroupId, {
+          title: result.groupTitle,
+        });
+        delete binding.pendingBrowserTitle;
+      } catch {
+        binding.pendingBrowserTitle = result.groupTitle;
+      }
+    } else if (binding.pendingBrowserTitle === browserTitle) {
+      delete binding.pendingBrowserTitle;
     }
     binding.windowId = chromeGroup.windowId;
     binding.savedTabIdByBrowserTabId = result.savedTabIdByBrowserTabId;
@@ -346,7 +623,7 @@ export async function adoptMovedTaskGroup(browserGroupId: number): Promise<boole
 }
 
 /**
- * Snapshot live task groups before Bok closes a window. Their existing Bok
+ * Snapshot live synced groups before Bok closes a window. Their existing Bok
  * records remain the source of truth, so these tabs must not become a second
  * ordinary saved session. Bindings are removed only after Chrome closes them.
  */
@@ -421,17 +698,17 @@ export async function restoreTaskGroupBindings(): Promise<void> {
       ),
     })),
   );
-  const activeTaskGroupKeys = new Set(
+  const activeSyncedGroupKeys = new Set(
     sessions.flatMap((session) =>
       session.groups.flatMap((group) =>
-        group.taskStatus === null ? [] : [bindingKey(session.id, group.id)],
+        group.grouped ? [bindingKey(session.id, group.id)] : [],
       ),
     ),
   );
   const claimedBrowserGroupIds = new Set<number>();
   let changed = false;
   for (const [key, binding] of Object.entries(bindings)) {
-    if (!activeTaskGroupKeys.has(key)) {
+    if (!activeSyncedGroupKeys.has(key)) {
       delete bindings[key];
       changed = true;
       continue;
@@ -467,47 +744,64 @@ export async function restoreTaskGroupBindings(): Promise<void> {
   }
   const existing = new Set(Object.keys(bindings));
 
-  const matches = sessions.flatMap((session) =>
-    session.groups.flatMap((savedGroup) => {
+  const recoveryCandidates: Array<
+    ScoredRecoveryCandidate<{
+      key: string;
+      sessionId: string;
+      savedGroupId: string;
+    }>
+  > = [];
+  for (const session of sessions) {
+    for (const savedGroup of session.groups) {
       const key = bindingKey(session.id, savedGroup.id);
-      if (savedGroup.taskStatus === null || existing.has(key)) return [];
-      const matchingGroups = candidates.filter(({ browserGroup, tabs }) =>
-        !claimedBrowserGroupIds.has(browserGroup.id) &&
-        browserGroup.title === getBrowserGroupTitle(savedGroup) &&
-        tabs.length === savedGroup.tabs.length &&
-        tabs.every(
-          (tab, index) => (tab.pendingUrl || tab.url) === savedGroup.tabs[index]?.url,
-        ),
-      );
-      return matchingGroups.length === 1
-        ? [{ key, sessionId: session.id, savedGroup, candidate: matchingGroups[0] }]
-        : [];
-    }),
-  );
+      if (!savedGroup.grouped || existing.has(key)) continue;
 
-  const matchCountByBrowserGroupId = new Map<number, number>();
-  for (const match of matches) {
-    const id = match.candidate.browserGroup.id;
-    matchCountByBrowserGroupId.set(id, (matchCountByBrowserGroupId.get(id) ?? 0) + 1);
+      for (const candidate of candidates) {
+        const { browserGroup, tabs } = candidate;
+        if (
+          claimedBrowserGroupIds.has(browserGroup.id) ||
+          !hasMatchingRecoveryTitle(savedGroup, browserGroup)
+        ) {
+          continue;
+        }
+        const mergePlan = getRecoveryMergePlan(savedGroup, tabs);
+        if (!hasSufficientTabOverlap(mergePlan)) continue;
+        recoveryCandidates.push({
+          savedGroupKey: key,
+          browserGroupId: browserGroup.id,
+          overlapCount: mergePlan.overlapCount,
+          overlapRatio: mergePlan.overlapRatio,
+          value: {
+            key,
+            sessionId: session.id,
+            savedGroupId: savedGroup.id,
+          },
+        });
+      }
+    }
   }
 
-  for (const match of matches) {
-    const { browserGroup, tabs } = match.candidate;
-    if (matchCountByBrowserGroupId.get(browserGroup.id) !== 1) continue;
-    const savedTabIdByBrowserTabId: Record<string, string> = {};
-    for (const [index, tab] of tabs.entries()) {
-      if (tab.id == null) continue;
-      savedTabIdByBrowserTabId[String(tab.id)] = match.savedGroup.tabs[index].id;
+  const selectedRecoveries = selectUnambiguousRecoveryCandidates(
+    recoveryCandidates,
+  );
+  for (const recovery of selectedRecoveries) {
+    try {
+      const binding = await mergeAndBindRecoveredGroup(
+        recovery.value.sessionId,
+        recovery.value.savedGroupId,
+        recovery.browserGroupId,
+      );
+      if (!binding) continue;
+      bindings[recovery.value.key] = binding;
+      claimedBrowserGroupIds.add(recovery.browserGroupId);
+      changed = true;
+    } catch (error) {
+      console.error('[bok] failed to merge recovered synced group', {
+        savedGroupId: recovery.value.savedGroupId,
+        browserGroupId: recovery.browserGroupId,
+        error,
+      });
     }
-    bindings[match.key] = {
-      sessionId: match.sessionId,
-      savedGroupId: match.savedGroup.id,
-      browserGroupId: browserGroup.id,
-      windowId: browserGroup.windowId,
-      savedTabIdByBrowserTabId,
-      ignoredBrowserTabIds: [],
-    };
-    changed = true;
   }
   if (changed) await setBindings(bindings);
 }

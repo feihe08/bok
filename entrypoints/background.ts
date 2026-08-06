@@ -9,7 +9,10 @@ import {
   saveAndCloseTabs,
 } from '../lib/save-tabs';
 import { executeSavedPageCommand } from '../lib/saved-page-operations';
-import { archiveEligibleGroups } from '../lib/storage';
+import {
+  archiveEligibleGroups,
+  ensureUniqueGroupedTitles,
+} from '../lib/storage';
 import {
   adoptMovedTaskGroup,
   clearTaskGroupBindingsForWindow,
@@ -19,11 +22,13 @@ import {
   reconcileTaskGroup,
   reconcileTaskTab,
   restoreTaskGroupBindings,
+  synchronizeBoundGroupTitles,
 } from '../lib/task-group-sync';
 
 const AUTO_ARCHIVE_ALARM = 'bok-auto-archive';
 const AUTO_ARCHIVE_INTERVAL_MINUTES = 60;
 const TASK_GROUP_RECONCILE_DEBOUNCE_MS = 120;
+const GROUP_BINDING_RESTORE_DEBOUNCE_MS = 750;
 const OPEN_BOK_MENU_ID = 'bok/open';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
 const SAVE_TAB_MENU_ID = 'bok/save-tab';
@@ -63,6 +68,7 @@ function normalizeContextMenuId(menuId: string): string {
 
 let operationQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
+let groupBindingRestoreTimer: ReturnType<typeof setTimeout> | undefined;
 const pendingTaskGroupAdoptionIds = new Set<number>();
 const pendingTaskGroupIds = new Set<number>();
 const pendingTaskTabIds = new Set<number>();
@@ -186,6 +192,18 @@ function scheduleTaskReconcile(): void {
   }, TASK_GROUP_RECONCILE_DEBOUNCE_MS);
 }
 
+function scheduleGroupBindingRestore(): void {
+  if (groupBindingRestoreTimer !== undefined) {
+    clearTimeout(groupBindingRestoreTimer);
+  }
+  groupBindingRestoreTimer = setTimeout(() => {
+    groupBindingRestoreTimer = undefined;
+    void enqueueOperation(restoreTaskGroupBindings).catch((error) => {
+      console.error('[bok] failed to restore synced group bindings', error);
+    });
+  }, GROUP_BINDING_RESTORE_DEBOUNCE_MS);
+}
+
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener(() => {
     void installContextMenus().catch((error) => {
@@ -198,9 +216,14 @@ export default defineBackground(() => {
   });
   void enqueueOperation(async () => {
     await restoreTaskGroupBindings();
+    const renamedGroups = await ensureUniqueGroupedTitles();
+    const titleSyncFailures = await synchronizeBoundGroupTitles(renamedGroups);
+    for (const failure of titleSyncFailures) {
+      console.error('[bok] failed to synchronize stored browser-group title', failure);
+    }
     await runAutoArchive();
   }).catch((error) => {
-    console.error('[bok] failed to restore task groups or run automatic archive', error);
+    console.error('[bok] failed to initialize synced groups or run automatic archive', error);
   });
 
   browser.alarms.onAlarm.addListener((alarm) => {
@@ -210,7 +233,17 @@ export default defineBackground(() => {
     });
   });
 
-  browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (
+      tab.groupId != null &&
+      tab.groupId !== -1 &&
+      (changeInfo.url !== undefined ||
+        changeInfo.title !== undefined ||
+        changeInfo.status === 'complete')
+    ) {
+      scheduleGroupBindingRestore();
+      scheduleTaskGroupReconcile(tab.groupId);
+    }
     if (changeInfo.groupId === undefined) return;
     void refreshSaveGroupMenuState().catch(() => undefined);
     scheduleTaskTabReconcile(tabId);
@@ -221,6 +254,10 @@ export default defineBackground(() => {
 
   browser.tabs.onActivated.addListener(() => {
     void refreshSaveGroupMenuState().catch(() => undefined);
+  });
+
+  browser.tabs.onMoved.addListener((tabId) => {
+    scheduleTaskTabReconcile(tabId);
   });
 
   browser.windows.onFocusChanged.addListener((windowId) => {
@@ -240,12 +277,14 @@ export default defineBackground(() => {
   });
 
   browser.tabGroups.onUpdated.addListener((group) => {
+    scheduleGroupBindingRestore();
     scheduleTaskGroupReconcile(group.id);
   });
 
   browser.tabGroups.onCreated.addListener((group) => {
     markTaskGroupCreated(group.id);
     scheduleTaskGroupAdoption(group.id);
+    scheduleGroupBindingRestore();
     scheduleTaskGroupReconcile(group.id);
     void enqueueOperation(async () => {
       if (await adoptMovedTaskGroup(group.id)) {

@@ -13,6 +13,7 @@ export type SavedPageCommand =
       title: string;
     }
   | { type: 'bok/remove-group'; sessionId: string; groupId: string }
+  | { type: 'bok/convert-group'; sessionId: string; groupId: string }
   | {
       type: 'bok/rename-group';
       sessionId: string;
@@ -68,17 +69,25 @@ export interface OpenGroupResult {
   openedTabs: number;
   mode: OpenMode;
   destination: OpenDestination;
-  /** True when an already-open task group was focused instead of duplicated. */
-  reusedTaskGroup?: boolean;
+  /** True when an already-open synced group was focused instead of duplicated. */
+  reusedSyncedGroup?: boolean;
+  /** Present when opening as a Chrome group converted a normal Bok group first. */
+  convertedGroup?: ConvertGroupResult;
 }
 
 export interface DeduplicateGroupResult {
   removedTabs: number;
 }
 
+export interface ConvertGroupResult {
+  groupTitle: string;
+  renamed: boolean;
+}
+
 export type SavedPageCommandResult =
   | OpenGroupResult
   | DeduplicateGroupResult
+  | ConvertGroupResult
   | null;
 
 export type SavedPageResponse =
@@ -107,6 +116,7 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
         typeof command.title === 'string'
       );
     case 'bok/remove-group':
+    case 'bok/convert-group':
     case 'bok/deduplicate-group':
       return hasGroupId(command);
     case 'bok/rename-group':
