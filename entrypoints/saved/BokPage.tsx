@@ -97,6 +97,17 @@ function getGroupTitle(group: TabGroup): string {
   return group.title.trim() || `${group.tabs.length} 个标签页`;
 }
 
+function formatGroupCreatedAt(createdAt: number): string {
+  const date = new Date(createdAt);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const datePart = [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join(
+    '-',
+  );
+  const timePart = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+  return `${datePart} ${timePart}`;
+}
+
 function getContentTitle(archiveView: ArchiveView, taskFilter: TaskFilter): string {
   const taskLabel = TASK_FILTERS.find((filter) => filter.value === taskFilter)?.label;
   if (archiveView === 'archived') {
@@ -1358,6 +1369,13 @@ export default function BokPage() {
                             点击重命名分组
                           </span>
                         )}
+                        <time
+                          className="group-created-at"
+                          dateTime={new Date(group.createdAt).toISOString()}
+                          title={`创建于 ${formatGroupCreatedAt(group.createdAt)}`}
+                        >
+                          {formatGroupCreatedAt(group.createdAt)}
+                        </time>
                         {group.title.trim() && <span>{group.tabs.length} 个标签</span>}
                         {group.locked && <span>已锁定</span>}
                         {group.taskStatus && <TaskBadge status={group.taskStatus} />}
