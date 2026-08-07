@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
 } from 'react';
@@ -315,6 +316,7 @@ export default function BokPage() {
   const [changingGroupId, setChangingGroupId] = useState('');
   const [changingTabId, setChangingTabId] = useState('');
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
+  const [importing, setImporting] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState('');
   const [groupTitleDraft, setGroupTitleDraft] = useState('');
   const groupTitleButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -325,6 +327,7 @@ export default function BokPage() {
   const groupDeleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const menuItemRefs = useRef(new Map<string, Array<HTMLButtonElement | undefined>>());
   const savingGroupTitleIds = useRef(new Set<string>());
+  const importInputRef = useRef<HTMLInputElement>(null);
   const cancellingGroupTitleIds = useRef(new Set<string>());
   const [theme, setTheme] = useState<Theme | null>(storedTheme);
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
@@ -683,6 +686,40 @@ export default function BokPage() {
     }
     if (!response.ok) throw new Error(response.error || '后台没有返回操作结果');
     return response.result;
+  }
+
+  async function importSessions(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file || importing) return;
+    if (
+      !window.confirm(
+        `将“${file.name}”合并到 Bok。当前记录会保留，并在写入前创建备份。继续？`,
+      )
+    ) {
+      return;
+    }
+
+    setImporting(true);
+    try {
+      const result = await runCommand({
+        type: 'bok/import-sessions',
+        json: await file.text(),
+      });
+      if (!result || !('importedSessions' in result)) {
+        throw new Error('后台没有返回导入结果');
+      }
+      setActionNotice({
+        type: 'success',
+        message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个分组、${result.importedTabs} 个标签；按三天规则归档 ${result.archivedGroups} 个分组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
+        persistent: true,
+      });
+    } catch (error) {
+      showCommandError('导入数据', error);
+    } finally {
+      setImporting(false);
+    }
   }
 
   async function deleteTab(groupId: string, tabId: string) {
@@ -1091,6 +1128,25 @@ export default function BokPage() {
                 ? `${totalTabCount} 个标签`
                 : `${visibleTabCount} / ${totalTabCount} 个标签`}
             </p>
+            <input
+              ref={importInputRef}
+              className="sr-only"
+              type="file"
+              accept="application/json,.json"
+              onChange={(event) => void importSessions(event)}
+            />
+            <button
+              type="button"
+              className="theme-toggle"
+              aria-label="导入 Bok 数据"
+              title="导入 Bok 数据"
+              disabled={importing}
+              onClick={() => importInputRef.current?.click()}
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <path d="M10 3.5v8M6.5 8l3.5 3.5L13.5 8M4 14v2.5h12V14" />
+              </svg>
+            </button>
             <button
               type="button"
               className="theme-toggle"

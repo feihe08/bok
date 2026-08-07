@@ -7,6 +7,7 @@ import {
   convertGroupToBrowserGroup,
   deduplicateGroup,
   getSavedGroup,
+  importSessionsJson,
   removeGroup,
   removeTab,
   renameGroup,
@@ -36,6 +37,8 @@ export async function executeSavedPageCommand(
   context: SavedPageOperationContext = {},
 ): Promise<SavedPageCommandResult> {
   switch (command.type) {
+    case 'bok/import-sessions':
+      return importSessionsJson(command.json);
     case 'bok/remove-tab':
       await removeTab(command.sessionId, command.tabId);
       await ignoreTaskTab(command.sessionId, command.tabId);

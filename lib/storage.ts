@@ -1,4 +1,5 @@
 import { browser } from 'wxt/browser';
+import { archiveEligibleGroupsInMemory } from './auto-archive';
 import {
   collectGroupedTitles,
   ensureUniqueGroupedTitlesInMemory,
@@ -8,7 +9,8 @@ import {
   reserveTimestampedGroupTitle,
   type GroupedTitleChange,
 } from './group-names';
-import type { ConvertGroupResult } from './messages';
+import type { ConvertGroupResult, ImportSessionsResult } from './messages';
+import { mergeImportedSessions } from './session-import';
 import type {
   DirectoryPath,
   SavedGroup,
@@ -20,6 +22,7 @@ import type {
 
 const SESSIONS_KEY = 'sessions';
 const SESSIONS_RECOVERY_KEY = 'sessionsRecovery';
+const SESSIONS_IMPORT_BACKUP_KEY = 'sessionsImportBackup';
 
 export const STORAGE_SCHEMA_VERSION = 1;
 
@@ -512,6 +515,7 @@ async function saveRecoveryEntries(
 }
 
 async function readStoredSessions(): Promise<{
+  raw: unknown;
   store: ParsedStore;
   sessions: StoredSession[];
   recoveryEntryCount: number;
@@ -538,6 +542,7 @@ async function readStoredSessions(): Promise<{
   const validated = validateStoredSessions(store);
   const recoveryEntryCount = await saveRecoveryEntries(validated.recoveries);
   return {
+    raw,
     store,
     sessions: validated.sessions,
     recoveryEntryCount,
@@ -555,6 +560,63 @@ export async function readSessions(): Promise<SessionsReadResult> {
 
 export async function getSessions(): Promise<SavedSession[]> {
   return (await readSessions()).sessions;
+}
+
+export async function importSessionsJson(json: string): Promise<ImportSessionsResult> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    throw new Error('导入文件不是合法 JSON');
+  }
+
+  const importedStore = parseStoredEnvelope(raw);
+  if (importedStore.sourceSchemaVersion !== STORAGE_SCHEMA_VERSION) {
+    throw new Error(`导入文件必须是 Bok v${STORAGE_SCHEMA_VERSION} 数据`);
+  }
+  const validated = validateStoredSessions(importedStore);
+  if (validated.recoveries.length > 0) {
+    const firstIssue = validated.recoveries[0]?.issues[0] ?? '数据无效';
+    throw new Error(`导入文件校验失败：${firstIssue}`);
+  }
+  if (validated.sessions.length === 0) throw new Error('导入文件没有保存记录');
+
+  const current = await readStoredSessions();
+  const existingSessions = current.sessions.map(normalizeSession);
+  const importedSessions = validated.sessions.map(normalizeSession);
+  const merged = mergeImportedSessions(existingSessions, importedSessions);
+  const now = Date.now();
+  const archivedGroups = archiveEligibleGroupsInMemory(merged.sessions, now);
+  const importedGroups = importedSessions.reduce(
+    (total, session) => total + session.groups.length,
+    0,
+  );
+  const importedTabs = importedSessions.reduce(
+    (total, session) =>
+      total + session.groups.reduce((count, group) => count + group.tabs.length, 0),
+    0,
+  );
+  const envelope: StoredEnvelope = {
+    schemaVersion: STORAGE_SCHEMA_VERSION,
+    revision: current.store.revision + 1,
+    sessions: merged.sessions,
+  };
+
+  await browser.storage.local.set({
+    [SESSIONS_IMPORT_BACKUP_KEY]: {
+      capturedAt: now,
+      value: current.raw ?? null,
+    },
+    [SESSIONS_KEY]: envelope,
+  });
+
+  return {
+    importedSessions: importedSessions.length,
+    importedGroups,
+    importedTabs,
+    renamedGroups: merged.titleChanges.length,
+    archivedGroups,
+  };
 }
 
 async function setSessions(sessions: SavedSession[]): Promise<void> {
@@ -769,30 +831,9 @@ export async function setGroupPinned(
   await setSessions(sessions);
 }
 
-const AUTO_ARCHIVE_AGE_MS = 3 * 24 * 60 * 60 * 1000;
-
-function canAutoArchiveGroup(group: SavedGroup, now: number): boolean {
-  return (
-    group.tabs.length > 0 &&
-    group.archivedAt === null &&
-    !group.pinned &&
-    group.taskStatus === null &&
-    group.tabs.every((tab) => tab.taskStatus === null) &&
-    now - group.createdAt >= AUTO_ARCHIVE_AGE_MS
-  );
-}
-
 export async function archiveEligibleGroups(now = Date.now()): Promise<number> {
   const sessions = await getSessions();
-  let archivedGroups = 0;
-
-  for (const session of sessions) {
-    for (const group of session.groups) {
-      if (!canAutoArchiveGroup(group, now)) continue;
-      group.archivedAt = now;
-      archivedGroups += 1;
-    }
-  }
+  const archivedGroups = archiveEligibleGroupsInMemory(sessions, now);
 
   if (archivedGroups > 0) await setSessions(sessions);
   return archivedGroups;

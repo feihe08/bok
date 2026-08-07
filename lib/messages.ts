@@ -4,6 +4,7 @@ export type OpenMode = 'tabs' | 'tab-group';
 export type OpenDestination = 'current-window' | 'new-window';
 
 export type SavedPageCommand =
+  | { type: 'bok/import-sessions'; json: string }
   | { type: 'bok/remove-tab'; sessionId: string; tabId: string }
   | {
       type: 'bok/rename-tab';
@@ -84,10 +85,19 @@ export interface ConvertGroupResult {
   renamed: boolean;
 }
 
+export interface ImportSessionsResult {
+  importedSessions: number;
+  importedGroups: number;
+  importedTabs: number;
+  renamedGroups: number;
+  archivedGroups: number;
+}
+
 export type SavedPageCommandResult =
   | OpenGroupResult
   | DeduplicateGroupResult
   | ConvertGroupResult
+  | ImportSessionsResult
   | null;
 
 export type SavedPageResponse =
@@ -104,6 +114,9 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
   if (typeof value !== 'object' || value === null) return false;
 
   const command = value as Record<string, unknown>;
+  if (command.type === 'bok/import-sessions') {
+    return typeof command.json === 'string';
+  }
   if (typeof command.sessionId !== 'string') return false;
 
   switch (command.type) {
