@@ -32,8 +32,8 @@ interface SaveSelectionOptions {
 
 /**
  * Capture every tab in a window into storage, then close them — the OneTab
- * flow. The saved-tabs page is opened first so the window survives having all
- * of its tabs removed.
+ * flow. Reuse an existing Bok tab across windows; otherwise open Bok in the
+ * source window so it survives having all of its tabs removed.
  */
 export async function saveAndCloseTabs(windowId: number): Promise<SaveResult> {
   const allTabs = await browser.tabs.query({ windowId });
@@ -120,7 +120,7 @@ async function saveAndCloseSelection(
 
   if (tabsToClose.size === 0) {
     if (options.openSavedPage) {
-      await openSavedPageForSave(windowId, savedPageUrl, tabsToClose);
+      await openOrFocusSavedPage(windowId);
     }
     return { savedTabs: 0, savedGroups: 0, skipped: selectedTabs.length };
   }
@@ -143,10 +143,9 @@ async function saveAndCloseSelection(
     await addSession(session);
   }
 
-  if (
-    options.openSavedPage ||
-    (await wouldCloseWindow(windowId, tabsToClose))
-  ) {
+  if (options.openSavedPage) {
+    await openOrFocusSavedPage(windowId);
+  } else if (await wouldCloseWindow(windowId, tabsToClose)) {
     // Keep the window alive when the selected tabs are the only tabs left.
     await openSavedPageForSave(windowId, savedPageUrl, tabsToClose);
   }
