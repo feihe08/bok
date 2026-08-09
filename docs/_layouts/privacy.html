@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f8f9fc" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#20242b" />
+    <meta name="description" content="{{ page.description | default: site.description }}" />
+    <meta property="og:title" content="{{ page.title }}" />
+    <meta property="og:description" content="{{ page.description | default: site.description }}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="{{ page.url | absolute_url }}" />
+    <title>{{ page.title }}</title>
+    <link rel="icon" href="{{ '/assets/bok.svg' | relative_url }}" type="image/svg+xml" />
+    <link rel="stylesheet" href="{{ '/assets/privacy.css' | relative_url }}" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到隐私政策正文</a>
+
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="brand" href="{{ '/' | relative_url }}" aria-label="Bok 隐私政策首页">
+          <img src="{{ '/assets/bok.svg' | relative_url }}" width="32" height="32" alt="" />
+          <span>Bok</span>
+        </a>
+        <span class="site-header__label">隐私政策</span>
+      </div>
+    </header>
+
+    <main id="main-content" class="privacy-shell" tabindex="-1">
+      <article class="privacy-content">
+        {{ content }}
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>Bok · 标签页数据仅保存在本地 Chrome 配置文件中</p>
+    </footer>
+  </body>
+</html>
