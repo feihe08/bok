@@ -1,27 +1,9 @@
-export interface SavedTabIdentity {
-  id: string;
-  url: string;
-}
-
-export interface BrowserTabIdentity {
-  id: number;
-  url: string;
-}
-
-export interface GroupMergePlan {
-  overlapCount: number;
-  overlapRatio: number;
-  savedTabIdByBrowserTabId: Record<string, string>;
-  unmatchedSavedTabIds: string[];
-}
-
-export interface ScoredRecoveryCandidate<T> {
-  savedGroupKey: string;
-  browserGroupId: number;
-  overlapCount: number;
-  overlapRatio: number;
-  value: T;
-}
+import type {
+  BrowserTabIdentity,
+  GroupMergePlan,
+  SavedTabIdentity,
+  ScoredRecoveryCandidate,
+} from './model';
 
 const SAME_GROUP_OVERLAP_THRESHOLD = 0.5;
 

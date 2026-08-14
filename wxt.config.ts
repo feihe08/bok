@@ -32,6 +32,7 @@ export default defineConfig({
       'alarms',
       'contextMenus',
     ],
+    optional_permissions: ['bookmarks'],
     action: {
       default_icon: {
         16: 'icon/16.png',

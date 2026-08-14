@@ -1,5 +1,11 @@
 # 书签数据结构
 
+> 状态说明：本文记录的是将 Bok 标签页记录进一步转换为带标签书签的旧设计，
+> 不属于 0.0.5 之后的 Chrome 书签管理与本地备份功能。当前书签管理直接以
+> `chrome.bookmarks` 为唯一数据源，不读取或写入本文的 `SavedTab.tags`、
+> `SavedTab.directory` 或 `sessions`。本地备份格式另见
+> [`docs/bookmark-backup.md`](./bookmark-backup.md)。本文字段仅为兼容保留，后续另行评估。
+
 本文档是 Bok 书签数据模型的唯一说明。修改书签字段、存储格式或 Chrome
 书签同步逻辑时，应先更新本文档。
 
@@ -18,7 +24,7 @@
 
 ## 核心类型
 
-定义位于 `lib/types.ts`：
+定义位于 `libs/saved-pages/model.ts`。该文件是 saved-pages 功能唯一的数据模型：
 
 ```ts
 export type DirectoryPath = [string, ...string[]];
@@ -235,7 +241,7 @@ session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原
 再停止加载。恢复副本不会被普通的 Bok 操作自动删除；只要恢复副本仍存在，保存页
 就会持续提示，避免后台先完成隔离后用户不知道发生过异常。
 
-`lib/storage.ts` 在读取时执行兼容转换：
+`libs/saved-pages/persistence.ts` 在读取时执行兼容转换：
 
 - 旧的 `"Dev/Tools"` 目录转换为 `["Dev", "Tools"]`
 - 缺失、空字符串或 `null` 目录转换为 `null`
@@ -318,43 +324,48 @@ v1 envelope 重新写入存储。
 - 扩展后台启动时尝试恢复；Chrome 延迟恢复标签组或标签加载完成时会防抖重试，
   用户从 Bok 打开已标记分组前也会再做一次兜底恢复。
 
-## 归档与组内去重
+## 保存网页的归档与组内去重
 
 - 归档只写入标签组的时间戳，不删除数据，也不改写标签页的兼容归档字段。
 - `group.archivedAt === null` 表示当前组，非空表示已归档组。保存页默认展示当前组，
   归档视图展示已归档组并提供恢复操作。
 - 手动归档不检查年龄、任务状态或固定状态。固定组手动归档时，同一次写入先设置
   `pinned: false`，再写入 `archivedAt`；恢复只清空 `archivedAt`，不会重新固定。
-- 自动归档由 Chrome alarms 每小时触发，并在后台启动时补充执行。只有创建至少
-  72 小时、组和所有标签页均为 `taskStatus: null`、`pinned: false` 且尚未归档的组
-  才符合条件。设备休眠期间不会主动唤醒，恢复运行后再检查。
+- 自动归档由 Chrome alarms 每小时触发，并在后台启动时补充执行。只有创建时间超过
+  7 天、组和所有标签页均不处于 `todo` 或 `doing`、`pinned: false` 且尚未归档的组
+  才符合条件；`done` 和未标记任务的组可以自动归档。设备休眠期间不会主动唤醒，
+  恢复运行后再检查。
 - 固定组在当前视图置顶；固定与锁定是两个独立状态。
 - 组内去重只检查目标组。比较键为 `new URL(url).href` 的完整规范 URL，查询
   参数和 hash 都参与比较；历史坏 URL 回退为去除首尾空格的原字符串。
 - 重复时保留组内第一条记录，返回移除数量。锁定组拒绝去重。
 
-## Chrome 书签栏映射
+## Chrome 书签栏与独立归档库
 
-当前数据模型已经能够表达 Chrome 书签栏路径，但写入 Chrome Bookmarks API
-的功能尚未实现。
+Chrome 书签管理直接以 Chrome Bookmarks API 返回的书签栏为事实来源，不读取或写入
+`SavedTab.tags`、`SavedTab.directory` 或 `sessions`。保存网页与 Chrome 书签是两个
+独立一级能力。
 
-实现同步时必须遵守：
+用户明确归档文件夹时，Bok 把完整文件夹树写入
+`browser.storage.local.bookmarkArchiveStore`。归档记录只保存文件夹名称、书签标题、
+完整 URL、层级、顺序、原父目录提示和事务状态；不保存 favicon、最后访问时间，也不把
+Chrome 节点 ID 当作恢复后的稳定身份。只有固定归档文件写入并校验成功后，才调用
+`bookmarks.removeTree` 从 Chrome 删除原文件夹。
 
-- `directory` 的每个路径段依次映射为书签栏下的一层文件夹。
-- `tags` 不映射为 Chrome 文件夹，也不创建重复书签。
-- `directory: null` 的书签不能静默选择目录，应先由用户指定。
-- 创建或移动 Chrome 书签成功后，才可以把本地状态视为已同步。
-- 不应硬编码 Chrome 书签栏的节点 ID，应通过 Bookmarks API 查找书签栏根节点。
+恢复会按快照重新创建内容。全部创建并校验成功后才移除本地归档记录；失败时保留归档，
+并只清理由本次恢复新建的根文件夹。Chrome 可能为恢复内容生成新的节点 ID 和创建时间。
+
+书签整理尚未实现。当前页面只保留未启用的整理按钮，不会分析重复或死链，也不会
+自动触发删除、移动或合并。
 
 ## 修改检查清单
 
 修改本数据结构时，至少同步检查：
 
-1. `lib/types.ts` 中的类型定义
-2. `lib/model.ts` 中的核心模型
-3. `lib/save-tabs.ts` 中的新记录初始化
-4. `lib/storage.ts` 中的旧数据兼容与读写逻辑
-5. 保存记录页面的读取与编辑逻辑
-6. Chrome 书签同步和归档逻辑
-7. `pnpm compile`
-8. `pnpm build`
+1. `libs/saved-pages/model.ts` 中的核心类型定义
+2. `libs/saved-pages/save-tabs.ts` 中的新记录初始化
+3. `libs/saved-pages/persistence.ts` 中的旧数据兼容与读写逻辑
+4. 保存记录页面的读取与编辑逻辑
+5. Chrome 书签同步和归档逻辑
+6. `pnpm compile`
+7. `pnpm build`

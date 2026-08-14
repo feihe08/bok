@@ -1,15 +1,5 @@
 import { browser } from 'wxt/browser';
 import { archiveEligibleGroupsInMemory } from './auto-archive';
-import {
-  collectGroupedTitles,
-  ensureUniqueGroupedTitlesInMemory,
-  getDefaultGroupTitle,
-  getSavedGroupTitle,
-  normalizeGroupTitle,
-  reserveTimestampedGroupTitle,
-  type GroupedTitleChange,
-} from './group-names';
-import type { ConvertGroupResult, ImportSessionsResult } from './messages';
 import { mergeImportedSessions } from './session-import';
 import type {
   DirectoryPath,
@@ -18,7 +8,7 @@ import type {
   SavedGroupTaskStatus,
   SavedSession,
   SavedTab,
-} from './types';
+} from './model';
 
 const SESSIONS_KEY = 'sessions';
 const SESSIONS_RECOVERY_KEY = 'sessionsRecovery';
@@ -50,6 +40,16 @@ interface RecoveryEntry {
 export interface SessionsReadResult {
   sessions: SavedSession[];
   recoveryEntryCount: number;
+}
+
+export interface ImportSessionsResult {
+  kind: 'saved-pages';
+  importedSessions: number;
+  importedGroups: number;
+  importedTabs: number;
+  skippedDuplicateGroups: number;
+  renamedGroups: number;
+  archivedGroups: number;
 }
 
 type StoredTab = Omit<
@@ -184,48 +184,50 @@ function normalizeTaskCompletedAt(
 function normalizeSession(session: StoredSession): SavedSession {
   return {
     ...session,
-    groups: session.groups.map(({ status, taskStatus, taskCompletedAt, ...group }) => {
-      const createdAt = normalizeCreatedAt(group.createdAt, session.createdAt);
-      const normalizedTaskStatus = normalizeTaskStatus(taskStatus, status);
-      return {
-        ...group,
-        title: typeof group.title === 'string' ? group.title : '',
-        createdAt,
-        archivedAt: normalizeArchivedAt(group.archivedAt),
-        color: normalizeGroupColor(group.color),
-        locked: group.locked === true,
-        grouped: group.grouped === true || normalizedTaskStatus !== null,
-        pinned: group.pinned === true,
-        taskStatus: normalizedTaskStatus,
-        taskCompletedAt: normalizeTaskCompletedAt(
-          taskCompletedAt,
-          normalizedTaskStatus,
-        ),
-        tabs: group.tabs.map(({ taskStatus, taskCompletedAt, ...tab }) => {
-          const normalizedTabTaskStatus = normalizeTaskStatus(taskStatus);
-          const tabCreatedAt = normalizeCreatedAt(tab.createdAt, createdAt);
-          return {
-            ...tab,
-            title:
-              typeof tab.title === 'string' && tab.title.trim()
-                ? tab.title
-                : tab.url,
-            favIconUrl:
-              typeof tab.favIconUrl === 'string' ? tab.favIconUrl : undefined,
-            createdAt: tabCreatedAt,
-            updatedAt: normalizeCreatedAt(tab.updatedAt, tabCreatedAt),
-            archivedAt: normalizeArchivedAt(tab.archivedAt),
-            tags: normalizeTags(tab.tags),
-            directory: normalizeDirectory(tab.directory),
-            taskStatus: normalizedTabTaskStatus,
-            taskCompletedAt: normalizeTaskCompletedAt(
-              taskCompletedAt,
-              normalizedTabTaskStatus,
-            ),
-          };
-        }),
-      };
-    }),
+    groups: session.groups.map(
+      ({ status, taskStatus, taskCompletedAt, ...group }) => {
+        const createdAt = normalizeCreatedAt(group.createdAt, session.createdAt);
+        const normalizedTaskStatus = normalizeTaskStatus(taskStatus, status);
+        return {
+          ...group,
+          title: typeof group.title === 'string' ? group.title : '',
+          createdAt,
+          archivedAt: normalizeArchivedAt(group.archivedAt),
+          color: normalizeGroupColor(group.color),
+          locked: group.locked === true,
+          grouped: group.grouped === true || normalizedTaskStatus !== null,
+          pinned: group.pinned === true,
+          taskStatus: normalizedTaskStatus,
+          taskCompletedAt: normalizeTaskCompletedAt(
+            taskCompletedAt,
+            normalizedTaskStatus,
+          ),
+          tabs: group.tabs.map(({ taskStatus, taskCompletedAt, ...tab }) => {
+            const normalizedTabTaskStatus = normalizeTaskStatus(taskStatus);
+            const tabCreatedAt = normalizeCreatedAt(tab.createdAt, createdAt);
+            return {
+              ...tab,
+              title:
+                typeof tab.title === 'string' && tab.title.trim()
+                  ? tab.title
+                  : tab.url,
+              favIconUrl:
+                typeof tab.favIconUrl === 'string' ? tab.favIconUrl : undefined,
+              createdAt: tabCreatedAt,
+              updatedAt: normalizeCreatedAt(tab.updatedAt, tabCreatedAt),
+              archivedAt: normalizeArchivedAt(tab.archivedAt),
+              tags: normalizeTags(tab.tags),
+              directory: normalizeDirectory(tab.directory),
+              taskStatus: normalizedTabTaskStatus,
+              taskCompletedAt: normalizeTaskCompletedAt(
+                taskCompletedAt,
+                normalizedTabTaskStatus,
+              ),
+            };
+          }),
+        };
+      },
+    ),
   };
 }
 
@@ -562,6 +564,17 @@ export async function getSessions(): Promise<SavedSession[]> {
   return (await readSessions()).sessions;
 }
 
+/** Returns an importer-compatible snapshot of all valid Bok saved-page records. */
+export async function exportSessionsJson(): Promise<string> {
+  const stored = await readStoredSessions();
+  const envelope: StoredEnvelope = {
+    schemaVersion: STORAGE_SCHEMA_VERSION,
+    revision: stored.store.revision,
+    sessions: stored.sessions,
+  };
+  return `${JSON.stringify(envelope, null, 2)}\n`;
+}
+
 export async function importSessionsJson(json: string): Promise<ImportSessionsResult> {
   let raw: unknown;
   try {
@@ -587,15 +600,6 @@ export async function importSessionsJson(json: string): Promise<ImportSessionsRe
   const merged = mergeImportedSessions(existingSessions, importedSessions);
   const now = Date.now();
   const archivedGroups = archiveEligibleGroupsInMemory(merged.sessions, now);
-  const importedGroups = importedSessions.reduce(
-    (total, session) => total + session.groups.length,
-    0,
-  );
-  const importedTabs = importedSessions.reduce(
-    (total, session) =>
-      total + session.groups.reduce((count, group) => count + group.tabs.length, 0),
-    0,
-  );
   const envelope: StoredEnvelope = {
     schemaVersion: STORAGE_SCHEMA_VERSION,
     revision: current.store.revision + 1,
@@ -611,15 +615,18 @@ export async function importSessionsJson(json: string): Promise<ImportSessionsRe
   });
 
   return {
-    importedSessions: importedSessions.length,
-    importedGroups,
-    importedTabs,
+    kind: 'saved-pages',
+    importedSessions: merged.importedSessions,
+    importedGroups: merged.importedGroups,
+    importedTabs: merged.importedTabs,
+    skippedDuplicateGroups: merged.skippedDuplicateGroups,
     renamedGroups: merged.titleChanges.length,
     archivedGroups,
   };
 }
 
-async function setSessions(sessions: SavedSession[]): Promise<void> {
+/** Persist a complete session snapshot with the next storage revision. */
+export async function writeSessions(sessions: SavedSession[]): Promise<void> {
   const current = await readStoredSessions();
   const envelope: StoredEnvelope = {
     schemaVersion: STORAGE_SCHEMA_VERSION,
@@ -627,404 +634,4 @@ async function setSessions(sessions: SavedSession[]): Promise<void> {
     sessions,
   };
   await browser.storage.local.set({ [SESSIONS_KEY]: envelope });
-}
-
-function requireSession(
-  sessions: SavedSession[],
-  sessionId: string,
-): SavedSession {
-  const session = sessions.find((candidate) => candidate.id === sessionId);
-  if (!session) throw new Error('找不到要操作的保存记录');
-  return session;
-}
-
-function requireGroup(session: SavedSession, groupId: string): SavedGroup {
-  const group = session.groups.find((candidate) => candidate.id === groupId);
-  if (!group) throw new Error('找不到要操作的分组');
-  return group;
-}
-
-function requireTab(group: SavedGroup, tabId: string): SavedTab {
-  const tab = group.tabs.find((candidate) => candidate.id === tabId);
-  if (!tab) throw new Error('找不到要操作的标签页');
-  return tab;
-}
-
-export async function addSession(session: SavedSession): Promise<void> {
-  const sessions = await getSessions();
-  await setSessions([session, ...sessions]);
-}
-
-export async function getSavedGroup(
-  sessionId: string,
-  groupId: string,
-): Promise<SavedGroup> {
-  const sessions = await getSessions();
-  return requireGroup(requireSession(sessions, sessionId), groupId);
-}
-
-export async function ensureUniqueGroupedTitles(): Promise<GroupedTitleChange[]> {
-  const sessions = await getSessions();
-  const changes = ensureUniqueGroupedTitlesInMemory(sessions);
-  if (changes.length > 0) await setSessions(sessions);
-  return changes;
-}
-
-export async function removeSession(sessionId: string): Promise<void> {
-  const sessions = await getSessions();
-  const targetSession = sessions.find((session) => session.id === sessionId);
-  if (!targetSession) throw new Error('找不到要删除的保存记录');
-  if (targetSession.groups.some((group) => group.locked)) {
-    throw new Error('保存记录中包含已锁定的分组，无法删除');
-  }
-  await setSessions(sessions.filter((s) => s.id !== sessionId));
-}
-
-/** Drop one tab, cleaning up any group or session left empty. */
-export async function removeTab(sessionId: string, tabId: string): Promise<void> {
-  const sessions = await getSessions();
-  const targetSession = requireSession(sessions, sessionId);
-
-  const targetGroup = targetSession.groups.find((group) =>
-    group.tabs.some((tab) => tab.id === tabId),
-  );
-  if (!targetGroup) throw new Error('找不到要删除的标签页');
-  if (targetGroup.locked) {
-    throw new Error('分组已锁定，无法删除其中的标签页');
-  }
-  const next: SavedSession[] = [];
-
-  for (const session of sessions) {
-    if (session.id !== sessionId) {
-      next.push(session);
-      continue;
-    }
-    const groups = session.groups
-      .map((g) => ({ ...g, tabs: g.tabs.filter((t) => t.id !== tabId) }))
-      .filter((g) => g.tabs.length > 0);
-    if (groups.length > 0) next.push({ ...session, groups });
-  }
-
-  await setSessions(next);
-}
-
-export async function renameTab(
-  sessionId: string,
-  groupId: string,
-  tabId: string,
-  title: string,
-): Promise<void> {
-  const normalizedTitle = title.trim();
-  if (!normalizedTitle) throw new Error('标签页标题不能为空');
-
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  const tab = requireTab(group, tabId);
-  tab.title = normalizedTitle;
-  tab.updatedAt = Date.now();
-  await setSessions(sessions);
-}
-
-/** Drop one group, dropping the session too if it becomes empty. */
-export async function removeGroup(sessionId: string, groupId: string): Promise<void> {
-  const sessions = await getSessions();
-  const targetSession = requireSession(sessions, sessionId);
-  const targetGroup = requireGroup(targetSession, groupId);
-  if (targetGroup.locked) {
-    throw new Error('分组已锁定，无法删除');
-  }
-  const next: SavedSession[] = [];
-
-  for (const session of sessions) {
-    if (session.id !== sessionId) {
-      next.push(session);
-      continue;
-    }
-    const groups = session.groups.filter((g) => g.id !== groupId);
-    if (groups.length > 0) next.push({ ...session, groups });
-  }
-
-  await setSessions(next);
-}
-
-export async function renameGroup(
-  sessionId: string,
-  groupId: string,
-  title: string,
-): Promise<void> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  let normalizedTitle = normalizeGroupTitle(title);
-  if (group.grouped) {
-    normalizedTitle ||= getDefaultGroupTitle(group.tabs.length);
-    const groupedTitles = collectGroupedTitles(sessions, group.id);
-    if (groupedTitles.has(normalizedTitle)) {
-      throw new Error(`标签组名称“${normalizedTitle}”已存在，请使用其他名称`);
-    }
-  }
-  group.title = normalizedTitle;
-  await setSessions(sessions);
-}
-
-export async function convertGroupToBrowserGroup(
-  sessionId: string,
-  groupId: string,
-  now = Date.now(),
-): Promise<ConvertGroupResult> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  const requestedTitle = getSavedGroupTitle(group);
-  if (group.grouped) {
-    return { groupTitle: requestedTitle, renamed: false };
-  }
-
-  const groupedTitles = collectGroupedTitles(sessions, group.id);
-  const groupTitle = reserveTimestampedGroupTitle(
-    requestedTitle,
-    groupedTitles,
-    now,
-  );
-  group.title = groupTitle;
-  group.grouped = true;
-  await setSessions(sessions);
-  return { groupTitle, renamed: groupTitle !== requestedTitle };
-}
-
-export async function setGroupArchived(
-  sessionId: string,
-  groupId: string,
-  archived: boolean,
-): Promise<void> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  if (archived) {
-    group.pinned = false;
-    group.archivedAt ??= Date.now();
-  } else {
-    group.archivedAt = null;
-  }
-  await setSessions(sessions);
-}
-
-export async function setGroupLocked(
-  sessionId: string,
-  groupId: string,
-  locked: boolean,
-): Promise<void> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  group.locked = locked;
-  await setSessions(sessions);
-}
-
-export async function setGroupPinned(
-  sessionId: string,
-  groupId: string,
-  pinned: boolean,
-): Promise<void> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  if (pinned && group.archivedAt !== null) {
-    throw new Error('已归档的分组不能固定，请先恢复');
-  }
-  group.pinned = pinned;
-  await setSessions(sessions);
-}
-
-export async function archiveEligibleGroups(now = Date.now()): Promise<number> {
-  const sessions = await getSessions();
-  const archivedGroups = archiveEligibleGroupsInMemory(sessions, now);
-
-  if (archivedGroups > 0) await setSessions(sessions);
-  return archivedGroups;
-}
-
-export async function setGroupTaskStatus(
-  sessionId: string,
-  groupId: string,
-  taskStatus: SavedGroupTaskStatus | null,
-): Promise<ConvertGroupResult | null> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  const now = Date.now();
-  let convertedGroup: ConvertGroupResult | null = null;
-
-  if (group.taskStatus === null) {
-    if (taskStatus === null) return null;
-    if (!group.grouped) {
-      const requestedTitle = getSavedGroupTitle(group);
-      const groupTitle = reserveTimestampedGroupTitle(
-        requestedTitle,
-        collectGroupedTitles(sessions, group.id),
-        now,
-      );
-      group.title = groupTitle;
-      group.grouped = true;
-      convertedGroup = {
-        groupTitle,
-        renamed: groupTitle !== requestedTitle,
-      };
-    }
-    group.taskStatus = 'doing';
-    group.taskCompletedAt = null;
-  } else {
-    if (group.taskStatus === taskStatus) return null;
-    group.taskStatus = taskStatus;
-    group.taskCompletedAt = taskStatus === 'done' ? now : null;
-  }
-  await setSessions(sessions);
-  return convertedGroup;
-}
-
-export async function setTabTaskStatus(
-  sessionId: string,
-  groupId: string,
-  tabId: string,
-  taskStatus: SavedGroupTaskStatus | null,
-): Promise<void> {
-  const sessions = await getSessions();
-  const tab = requireTab(requireGroup(requireSession(sessions, sessionId), groupId), tabId);
-  const now = Date.now();
-
-  if (tab.taskStatus === null) {
-    if (taskStatus === null) return;
-    tab.taskStatus = 'doing';
-    tab.taskCompletedAt = null;
-  } else {
-    if (tab.taskStatus === taskStatus) return;
-    tab.taskStatus = taskStatus;
-    tab.taskCompletedAt = taskStatus === 'done' ? now : null;
-  }
-  await setSessions(sessions);
-}
-
-export interface TaskGroupTabSnapshot {
-  browserTabId: number;
-  savedTabId?: string;
-  url: string;
-  title: string;
-  favIconUrl?: string;
-}
-
-export async function syncTaskGroupSnapshot(
-  sessionId: string,
-  groupId: string,
-  tabs: TaskGroupTabSnapshot[],
-  previouslyMappedSavedTabIds: string[],
-  metadata?: { title?: string; color?: SavedGroupColor },
-  canCommit: () => boolean = () => true,
-): Promise<{
-  active: boolean;
-  savedTabIdByBrowserTabId: Record<string, string>;
-  groupTitle?: string;
-}> {
-  const sessions = await getSessions();
-  if (!canCommit()) {
-    return { active: false, savedTabIdByBrowserTabId: {} };
-  }
-  const session = sessions.find((candidate) => candidate.id === sessionId);
-  const group = session?.groups.find((candidate) => candidate.id === groupId);
-  if (!group || !group.grouped) {
-    return { active: false, savedTabIdByBrowserTabId: {} };
-  }
-
-  const now = Date.now();
-  const existingById = new Map(group.tabs.map((tab) => [tab.id, tab]));
-  const previousIds = new Set(previouslyMappedSavedTabIds);
-  const currentIds = new Set<string>();
-  const snapshotTabs: SavedTab[] = [];
-  const savedTabIdByBrowserTabId: Record<string, string> = {};
-
-  for (const snapshot of tabs) {
-    const existing =
-      snapshot.savedTabId && !currentIds.has(snapshot.savedTabId)
-        ? existingById.get(snapshot.savedTabId)
-        : undefined;
-    const nextTitle = snapshot.title.trim() || snapshot.url;
-    const savedTab = existing
-      ? existing.url === snapshot.url &&
-        existing.title === nextTitle &&
-        existing.favIconUrl === snapshot.favIconUrl
-        ? existing
-        : {
-            ...existing,
-            url: snapshot.url,
-            title: nextTitle,
-            favIconUrl: snapshot.favIconUrl,
-            updatedAt: now,
-          }
-      : {
-        id: crypto.randomUUID(),
-        url: snapshot.url,
-        title: nextTitle,
-        favIconUrl: snapshot.favIconUrl,
-        createdAt: now,
-        updatedAt: now,
-        tags: [],
-        directory: null,
-        taskStatus: null,
-        taskCompletedAt: null,
-        archivedAt: null,
-      };
-    currentIds.add(savedTab.id);
-    snapshotTabs.push(savedTab);
-    savedTabIdByBrowserTabId[String(snapshot.browserTabId)] = savedTab.id;
-  }
-
-  const removedIds = new Set(
-    [...previousIds].filter((savedTabId) => !currentIds.has(savedTabId)),
-  );
-  const preservedTabs = group.tabs.filter(
-    (tab) => !currentIds.has(tab.id) && !removedIds.has(tab.id),
-  );
-
-  group.tabs = [...snapshotTabs, ...preservedTabs];
-  group.grouped = true;
-  if (metadata?.title !== undefined) {
-    const requestedTitle =
-      normalizeGroupTitle(metadata.title) || getDefaultGroupTitle(group.tabs.length);
-    group.title = reserveTimestampedGroupTitle(
-      requestedTitle,
-      collectGroupedTitles(sessions, group.id),
-      now,
-    );
-  }
-  if (metadata?.color !== undefined) group.color = metadata.color;
-  await setSessions(sessions);
-
-  return {
-    active: true,
-    savedTabIdByBrowserTabId,
-    groupTitle: getSavedGroupTitle(group),
-  };
-}
-
-export async function deduplicateGroup(
-  sessionId: string,
-  groupId: string,
-): Promise<number> {
-  const sessions = await getSessions();
-  const group = requireGroup(requireSession(sessions, sessionId), groupId);
-  if (group.locked) throw new Error('分组已锁定，无法移除重复项');
-
-  const seen = new Set<string>();
-  const uniqueTabs: SavedTab[] = [];
-  for (const tab of group.tabs) {
-    let key = tab.url;
-    try {
-      key = new URL(tab.url).href;
-    } catch {
-      // Preserve unparsable URLs exactly as stored.
-    }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    uniqueTabs.push(tab);
-  }
-
-  const removedTabs = group.tabs.length - uniqueTabs.length;
-  if (removedTabs > 0) {
-    group.tabs = uniqueTabs;
-    await setSessions(sessions);
-  }
-  return removedTabs;
 }

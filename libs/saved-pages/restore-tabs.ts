@@ -5,8 +5,8 @@ import type {
   OpenMode,
 } from './messages';
 import { getSavedGroupTitle } from './group-names';
-import { getSavedGroup } from './storage';
-import type { SavedTab } from './types';
+import { getSavedGroup } from './store';
+import type { SavedTab } from './model';
 
 /**
  * The public opening result plus the transient Chrome identifiers needed by

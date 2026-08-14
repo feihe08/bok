@@ -1,4 +1,13 @@
 /**
+ * Progress of an item explicitly marked as a task by the user.
+ * `todo` is not started, `doing` is in progress, and `done` is completed.
+ */
+export type TaskStatus = 'todo' | 'doing' | 'done';
+
+/** A globally unique, immutable UUID v4. */
+export type Id = string;
+
+/**
  * One directory below Chrome's bookmarks bar.
  *
  * Each item is one folder name, so ["Dev", "Tools"] maps to Dev/Tools without
@@ -6,12 +15,9 @@
  */
 export type DirectoryPath = [string, ...string[]];
 
-/**
- * One saved tab. Fields mirror the "书签源信息" spec in requirement.md so a
- * SavedTab can later be promoted into a Chrome bookmark or archived to iCloud.
- */
+/** One saved tab. */
 export interface SavedTab {
-  id: string;
+  id: Id;
   /** 链接 */
   url: string;
   /** 标题 */
@@ -48,7 +54,7 @@ export type SavedGroupTaskStatus = TaskStatus;
 
 /** One ordered Bok group. `grouped` distinguishes ordinary groups from Chrome tab groups. */
 export interface SavedGroup {
-  id: string;
+  id: Id;
   /** 分组名称；普通分组可重名，标签组必须使用唯一的非空名称。 */
   title: string;
   /** 分组进入 Bok 的时间。 */
@@ -72,8 +78,7 @@ export interface SavedGroup {
 
 /** One click of the extension icon produces one session. */
 export interface SavedSession {
-  id: string;
+  id: Id;
   createdAt: number;
   groups: SavedGroup[];
 }
-import type { TaskStatus } from './model';

@@ -15,15 +15,15 @@ import type {
   OpenMode,
   SavedPageCommand,
   SavedPageResponse,
-} from '../../lib/messages';
-import { getSessions } from '../../lib/storage';
+} from '../../libs/saved-pages/messages';
+import { getSessions } from '../../libs/saved-pages/persistence';
 import type {
   SavedGroup,
   SavedGroupTaskStatus,
   SavedSession,
   SavedTab,
-} from '../../lib/types';
-import { ActionMenu, type ActionMenuEntry } from './ActionMenu';
+} from '../../libs/saved-pages/model';
+import { ActionMenu, type ActionMenuEntry } from '../shared/ActionMenu';
 import { InlineEditor } from './InlineEditor';
 
 const dateFormatter = new Intl.DateTimeFormat('zh-CN', {

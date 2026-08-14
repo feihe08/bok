@@ -4,15 +4,21 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
 } from 'react';
 import { browser } from 'wxt/browser';
-import type { SavedPageCommand, SavedPageResponse } from '../../lib/messages';
-import type { Tab, TabGroup, TaskStatus } from '../../lib/model';
-import { readSessions } from '../../lib/storage';
-import type { SavedSession } from '../../lib/types';
+import type {
+  SavedPageCommand,
+  SavedPageResponse,
+} from '../../libs/saved-pages/messages';
+import type {
+  SavedGroup,
+  SavedSession,
+  SavedTab,
+  TaskStatus,
+} from '../../libs/saved-pages/model';
+import { readSessions } from '../../libs/saved-pages/persistence';
 
 type TaskFilter = 'all' | TaskStatus;
 type OpenGroupOptions = {
@@ -21,7 +27,7 @@ type OpenGroupOptions = {
 };
 type Theme = 'light' | 'dark';
 type ArchiveView = 'current' | 'archived';
-type ManagedGroup = TabGroup & { sessionId: string };
+type ManagedGroup = SavedGroup & { sessionId: string };
 type ActionNotice = {
   type: 'success' | 'error';
   message: string;
@@ -55,26 +61,7 @@ function getManagedGroups(sessions: SavedSession[]): ManagedGroup[] {
     .flatMap((session) =>
       session.groups
         .filter((group) => group.tabs.length > 0)
-        .map((group) => ({
-          id: group.id,
-          sessionId: session.id,
-          title: group.title,
-          createdAt: group.createdAt,
-          isBrowserGroup: group.grouped,
-          locked: group.locked,
-          pinned: group.pinned,
-          taskStatus: group.taskStatus,
-          taskCompletedAt: group.taskCompletedAt,
-          archivedAt: group.archivedAt,
-          tabs: group.tabs.map((tab) => ({
-            id: tab.id,
-            url: tab.url,
-            title: tab.title,
-            createdAt: tab.createdAt,
-            taskStatus: tab.taskStatus,
-            taskCompletedAt: tab.taskCompletedAt,
-          })),
-        })),
+        .map((group) => ({ ...group, sessionId: session.id })),
     );
 }
 
@@ -94,7 +81,7 @@ function getGroupsForView(
   });
 }
 
-function getGroupTitle(group: TabGroup): string {
+function getGroupTitle(group: SavedGroup): string {
   return group.title.trim() || `${group.tabs.length} 个标签页`;
 }
 
@@ -170,7 +157,7 @@ function getFaviconFallback(url: string): string {
   }
 }
 
-function Favicon({ tab }: { tab: Tab }) {
+function Favicon({ tab }: { tab: SavedTab }) {
   const [failed, setFailed] = useState(false);
   const source = getFaviconUrl(tab.url);
 
@@ -195,7 +182,7 @@ function Favicon({ tab }: { tab: Tab }) {
   );
 }
 
-function matchesTaskFilter(group: TabGroup, filter: TaskFilter): boolean {
+function matchesTaskFilter(group: SavedGroup, filter: TaskFilter): boolean {
   if (filter === 'all') return true;
   return group.taskStatus === filter || group.tabs.some((tab) => tab.taskStatus === filter);
 }
@@ -316,7 +303,7 @@ export default function BokPage() {
   const [changingGroupId, setChangingGroupId] = useState('');
   const [changingTabId, setChangingTabId] = useState('');
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
-  const [importing, setImporting] = useState(false);
+  const [openingBookmarkManager, setOpeningBookmarkManager] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState('');
   const [groupTitleDraft, setGroupTitleDraft] = useState('');
   const groupTitleButtonRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -327,7 +314,6 @@ export default function BokPage() {
   const groupDeleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const menuItemRefs = useRef(new Map<string, Array<HTMLButtonElement | undefined>>());
   const savingGroupTitleIds = useRef(new Set<string>());
-  const importInputRef = useRef<HTMLInputElement>(null);
   const cancellingGroupTitleIds = useRef(new Set<string>());
   const [theme, setTheme] = useState<Theme | null>(storedTheme);
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
@@ -356,10 +342,6 @@ export default function BokPage() {
     () => viewGroups.reduce((total, group) => total + group.tabs.length, 0),
     [viewGroups],
   );
-  const visibleTabCount = useMemo(
-    () => visibleGroups.reduce((total, group) => total + group.tabs.length, 0),
-    [visibleGroups],
-  );
   const taskCounts = useMemo<TaskCounts>(() => {
     const counts: TaskCounts = {
       todo: { groups: 0, tabs: 0 },
@@ -382,6 +364,12 @@ export default function BokPage() {
     }
     return counts;
   }, [groups]);
+
+  useEffect(() => {
+    void browser.runtime
+      .sendMessage({ type: 'bok/bookmark-backup' })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -688,52 +676,11 @@ export default function BokPage() {
     return response.result;
   }
 
-  async function importSessions(event: ChangeEvent<HTMLInputElement>) {
-    const input = event.currentTarget;
-    const file = input.files?.[0];
-    input.value = '';
-    if (!file || importing) return;
-    if (
-      !window.confirm(
-        `将“${file.name}”合并到 Bok。当前记录会保留，并在写入前创建备份。继续？`,
-      )
-    ) {
-      return;
-    }
-
-    setImporting(true);
-    try {
-      const result = await runCommand({
-        type: 'bok/import-sessions',
-        json: await file.text(),
-      });
-      if (!result || !('importedSessions' in result)) {
-        throw new Error('后台没有返回导入结果');
-      }
-      setActionNotice({
-        type: 'success',
-        message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个分组、${result.importedTabs} 个标签；按三天规则归档 ${result.archivedGroups} 个分组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
-        persistent: true,
-      });
-    } catch (error) {
-      showCommandError('导入数据', error);
-    } finally {
-      setImporting(false);
-    }
-  }
-
   async function deleteTab(groupId: string, tabId: string) {
     const group = groups.find((candidate) => candidate.id === groupId);
     if (!group) return;
     const tab = group.tabs.find((candidate) => candidate.id === tabId);
-    if (
-      !tab ||
-      !window.confirm(
-        `从 Bok 保存记录中永久删除“${tab.title}”？此操作无法恢复，但不会关闭浏览器中的标签页。`,
-      )
-    ) {
-      return;
-    }
+    if (!tab) return;
 
     try {
       await runCommand({
@@ -783,7 +730,7 @@ export default function BokPage() {
   }
 
   async function convertGroup(group: ManagedGroup) {
-    if (changingGroupId || group.isBrowserGroup) return;
+    if (changingGroupId || group.grouped) return;
     closeGroupMenu();
     setChangingGroupId(group.id);
 
@@ -965,7 +912,7 @@ export default function BokPage() {
 
   async function setTabTaskStatus(
     group: ManagedGroup,
-    tab: Tab,
+    tab: SavedTab,
     status: TaskStatus | null,
   ) {
     if (changingTabId) return;
@@ -1039,6 +986,37 @@ export default function BokPage() {
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     setTheme(nextTheme);
+  }
+
+  async function openBookmarkManager() {
+    if (openingBookmarkManager) return;
+    setOpeningBookmarkManager(true);
+    try {
+      const granted = await browser.permissions.request({
+        permissions: ['bookmarks'],
+      });
+      if (!granted) {
+        setActionNotice({
+          type: 'error',
+          message: '未授予书签权限，标签页快速保存不受影响。',
+        });
+        return;
+      }
+
+      const managerUrl = browser.runtime.getURL('/bookmark-manager.html');
+      const existing = await browser.tabs.query({ url: managerUrl });
+      const reusable = existing.find((tab) => tab.id != null);
+      if (reusable?.id != null) {
+        await browser.windows.update(reusable.windowId, { focused: true });
+        await browser.tabs.update(reusable.id, { active: true });
+      } else {
+        await browser.tabs.create({ url: managerUrl, active: true });
+      }
+    } catch (error) {
+      showCommandError('打开书签管理', error);
+    } finally {
+      setOpeningBookmarkManager(false);
+    }
   }
 
   async function openGroup(
@@ -1123,30 +1101,17 @@ export default function BokPage() {
           </label>
 
           <div className="topbar__actions">
-            <p className="topbar__summary" aria-live="polite">
-              {visibleTabCount === totalTabCount
-                ? `${totalTabCount} 个标签`
-                : `${visibleTabCount} / ${totalTabCount} 个标签`}
-            </p>
-            <input
-              ref={importInputRef}
-              className="sr-only"
-              type="file"
-              accept="application/json,.json"
-              onChange={(event) => void importSessions(event)}
-            />
             <button
               type="button"
-              className="theme-toggle"
-              aria-label="导入 Bok 数据"
-              title="导入 Bok 数据"
-              disabled={importing}
-              onClick={() => importInputRef.current?.click()}
+              className="bookmark-manager-entry"
+              disabled={openingBookmarkManager}
+              onClick={() => void openBookmarkManager()}
             >
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M10 3.5v8M6.5 8l3.5 3.5L13.5 8M4 14v2.5h12V14" />
-              </svg>
+              {openingBookmarkManager ? '打开中…' : '书签管理'}
             </button>
+            <a className="topbar__link" href="/options.html">
+              设置
+            </a>
             <button
               type="button"
               className="theme-toggle"
@@ -1269,7 +1234,7 @@ export default function BokPage() {
                           <PinIcon />
                         </span>
                       )}
-                      {group.isBrowserGroup && <BrowserGroupIcon />}
+                      {group.grouped && <BrowserGroupIcon />}
                       <span className="group-nav__title">{getGroupTitle(group)}</span>
                       <span className="sidebar__count">{group.tabs.length}</span>
                     </button>
@@ -1342,18 +1307,18 @@ export default function BokPage() {
                 const collapsed = collapsedGroupIds.has(group.id);
                 const title = getGroupTitle(group);
                 const isTaskGroup = group.taskStatus !== null;
-                const isBrowserGroup = group.isBrowserGroup;
-                const openMenuItemCount = isBrowserGroup ? 2 : 4;
+                const grouped = group.grouped;
+                const openMenuItemCount = grouped ? 2 : 4;
                 const convertMenuIndex = openMenuItemCount;
                 const deduplicateMenuIndex =
-                  convertMenuIndex + (isBrowserGroup ? 0 : 1);
+                  convertMenuIndex + (grouped ? 0 : 1);
                 const lockMenuIndex = deduplicateMenuIndex + 1;
                 const taskMenuStartIndex = lockMenuIndex + 1;
                 const defaultOpenOptions: OpenGroupOptions = {
-                  mode: isBrowserGroup ? 'tab-group' : 'tabs',
+                  mode: grouped ? 'tab-group' : 'tabs',
                   destination: 'current-window',
                 };
-                const defaultOpenTitle = isBrowserGroup
+                const defaultOpenTitle = grouped
                   ? '以浏览器标签组形式打开全部标签'
                   : '在此窗口打开全部标签';
                 const groupChanging = changingGroupId === group.id;
@@ -1368,12 +1333,14 @@ export default function BokPage() {
                   <section
                     key={group.id}
                     id={`group-${group.id}`}
-                    className={`tab-group${isTaskGroup ? ' tab-group--task' : ''}`}
+                    className={`tab-group${
+                      isTaskGroup ? ' tab-group--task' : ''
+                    }${group.archivedAt !== null ? ' tab-group--archived' : ''}`}
                     data-task-status={group.taskStatus ?? undefined}
                     aria-labelledby={`group-title-${group.id}`}
                   >
                     <header className="tab-group__header">
-                      {isBrowserGroup && (
+                      {grouped && (
                         <span
                           className="tab-group__kind"
                           role="img"
@@ -1459,7 +1426,7 @@ export default function BokPage() {
                           title={defaultOpenTitle}
                           onClick={() => void openGroup(group, defaultOpenOptions)}
                         >
-                          {isBrowserGroup ? (
+                          {grouped ? (
                             <BrowserGroupIcon />
                           ) : (
                             <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -1564,7 +1531,7 @@ export default function BokPage() {
                               aria-label={`${title} 的更多操作`}
                               onKeyDown={(event) => handleMenuKeyDown(event, group.id)}
                             >
-                              {!isBrowserGroup && (
+                              {!grouped && (
                                 <button
                                   type="button"
                                   role="menuitem"
@@ -1591,7 +1558,7 @@ export default function BokPage() {
                                 type="button"
                                 role="menuitem"
                                 ref={(element) =>
-                                  setMenuItemRef(group.id, isBrowserGroup ? 0 : 1, element)
+                                  setMenuItemRef(group.id, grouped ? 0 : 1, element)
                                 }
                                 onClick={() =>
                                   void openGroup(
@@ -1609,7 +1576,7 @@ export default function BokPage() {
                                 </svg>
                                 在此窗口以标签组打开
                               </button>
-                              {!isBrowserGroup && (
+                              {!grouped && (
                                 <button
                                   type="button"
                                   role="menuitem"
@@ -1636,7 +1603,7 @@ export default function BokPage() {
                                 type="button"
                                 role="menuitem"
                                 ref={(element) =>
-                                  setMenuItemRef(group.id, isBrowserGroup ? 1 : 3, element)
+                                  setMenuItemRef(group.id, grouped ? 1 : 3, element)
                                 }
                                 onClick={() =>
                                   void openGroup(
@@ -1656,7 +1623,7 @@ export default function BokPage() {
                                 在新窗口以标签组打开
                               </button>
                               <div className="group-menu__separator" role="separator" />
-                              {!isBrowserGroup && (
+                              {!grouped && (
                                 <>
                                   <button
                                     type="button"
@@ -1764,6 +1731,40 @@ export default function BokPage() {
                                 onClick={(event) => openChromeUrl(event, tab.url)}
                               />
                               <Favicon tab={tab} />
+                              <span className="tab-actions">
+                                <button
+                                  type="button"
+                                  className="tab-action tab-action--delete"
+                                  aria-label={
+                                    group.locked
+                                      ? `组已锁定，先解锁后才能删除：${tab.title}`
+                                      : `删除：${tab.title}`
+                                  }
+                                  disabled={group.locked}
+                                  title={group.locked ? '组已锁定，先解锁后才能删除标签' : '删除'}
+                                  onClick={() => void deleteTab(group.id, tab.id)}
+                                >
+                                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                                    <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
+                                  </svg>
+                                </button>
+                                {tab.taskStatus === null && (
+                                  <button
+                                    type="button"
+                                    className="tab-action tab-action--task"
+                                    aria-label={`标记为任务：${tab.title}`}
+                                    title="标记为任务（Doing）"
+                                    disabled={changingTabId === tab.id}
+                                    ref={(element) => {
+                                      if (element) tabTaskButtonRefs.current.set(tab.id, element);
+                                      else tabTaskButtonRefs.current.delete(tab.id);
+                                    }}
+                                    onClick={() => void setTabTaskStatus(group, tab, 'doing')}
+                                  >
+                                    <TaskIcon status="doing" />
+                                  </button>
+                                )}
+                              </span>
                               <span className="tab-title">
                                 <span className="tab-title__text">{tab.title}</span>
                                 {tab.taskStatus && (
@@ -1795,40 +1796,6 @@ export default function BokPage() {
                                 )}
                               </span>
                               <span className="tab-url">{getDisplayUrl(tab.url)}</span>
-                              <span className="tab-actions">
-                                {tab.taskStatus === null && (
-                                  <button
-                                    type="button"
-                                    className="tab-action tab-action--task"
-                                    aria-label={`标记为任务：${tab.title}`}
-                                    title="标记为任务（Doing）"
-                                    disabled={changingTabId === tab.id}
-                                    ref={(element) => {
-                                      if (element) tabTaskButtonRefs.current.set(tab.id, element);
-                                      else tabTaskButtonRefs.current.delete(tab.id);
-                                    }}
-                                    onClick={() => void setTabTaskStatus(group, tab, 'doing')}
-                                  >
-                                    <TaskIcon status="doing" />
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  className="tab-action tab-action--delete"
-                                  aria-label={
-                                    group.locked
-                                      ? `组已锁定，先解锁后才能删除：${tab.title}`
-                                      : `删除：${tab.title}`
-                                  }
-                                  disabled={group.locked}
-                                  title={group.locked ? '组已锁定，先解锁后才能删除标签' : '删除'}
-                                  onClick={() => void deleteTab(group.id, tab.id)}
-                                >
-                                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                                    <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
-                                  </svg>
-                                </button>
-                              </span>
                           </li>
                         ))}
                       </ol>

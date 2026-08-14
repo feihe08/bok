@@ -7,7 +7,6 @@ import {
   convertGroupToBrowserGroup,
   deduplicateGroup,
   getSavedGroup,
-  importSessionsJson,
   removeGroup,
   removeTab,
   renameGroup,
@@ -17,7 +16,8 @@ import {
   setGroupPinned,
   setGroupTaskStatus,
   setTabTaskStatus,
-} from './storage';
+} from './store';
+import { importSessionsJson } from './persistence';
 import {
   bindOpenedTaskGroup,
   clearTaskGroupBinding,
@@ -26,7 +26,7 @@ import {
   ignoreTaskTab,
   restoreTaskGroupBindings,
   updateBoundGroupTitle,
-} from './task-group-sync';
+} from '../tab-group-sync/sync';
 
 export interface SavedPageOperationContext {
   currentWindowId?: number;

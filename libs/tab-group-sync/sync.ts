@@ -3,38 +3,27 @@ import {
   createGroupMergePlan,
   hasSufficientTabOverlap,
   selectUnambiguousRecoveryCandidates,
-  type ScoredRecoveryCandidate,
-} from './group-sync-recovery';
+} from './recovery';
+import type {
+  PreparedTaskGroupsForSave,
+  ScoredRecoveryCandidate,
+  TaskGroupBinding,
+} from './model';
 import {
   getSavedGroupTitle,
   type GroupedTitleChange,
-} from './group-names';
+} from '../saved-pages/group-names';
 import {
   getSavedGroup,
-  getSessions,
   syncTaskGroupSnapshot,
   type TaskGroupTabSnapshot,
-} from './storage';
-import type { SavedGroup, SavedGroupColor } from './types';
+} from '../saved-pages/store';
+import { getSessions } from '../saved-pages/persistence';
+import type { SavedGroup, SavedGroupColor } from '../saved-pages/model';
 
 const TASK_GROUP_BINDINGS_KEY = 'task-group-bindings';
 const removedBrowserGroupIds = new Set<number>();
 const closingWindowIds = new Set<number>();
-
-export interface TaskGroupBinding {
-  sessionId: string;
-  savedGroupId: string;
-  browserGroupId: number;
-  windowId: number;
-  savedTabIdByBrowserTabId: Record<string, string>;
-  ignoredBrowserTabIds: number[];
-  pendingBrowserTitle?: string;
-}
-
-export interface PreparedTaskGroupsForSave {
-  excludedTabIds: Set<number>;
-  bindingKeys: string[];
-}
 
 type StoredBindings = Record<string, TaskGroupBinding>;
 

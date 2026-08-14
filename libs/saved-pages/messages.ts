@@ -1,4 +1,6 @@
-import type { SavedGroupTaskStatus } from './types';
+import type { SavedGroupTaskStatus } from './model';
+import type { ImportSessionsResult } from './persistence';
+import type { ConvertGroupResult } from './store';
 
 export type OpenMode = 'tabs' | 'tab-group';
 export type OpenDestination = 'current-window' | 'new-window';
@@ -78,19 +80,6 @@ export interface OpenGroupResult {
 
 export interface DeduplicateGroupResult {
   removedTabs: number;
-}
-
-export interface ConvertGroupResult {
-  groupTitle: string;
-  renamed: boolean;
-}
-
-export interface ImportSessionsResult {
-  importedSessions: number;
-  importedGroups: number;
-  importedTabs: number;
-  renamedGroups: number;
-  archivedGroups: number;
 }
 
 export type SavedPageCommandResult =

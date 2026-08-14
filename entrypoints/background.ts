@@ -1,18 +1,27 @@
 import {
   isSavedPageCommand,
   type SavedPageResponse,
-} from '../lib/messages';
+} from '../libs/saved-pages/messages';
+import { importBokDataJson, isImportDataCommand } from '../libs/backup/import-data';
+import {
+  isBookmarkBackupCommand,
+  runBookmarkBackup,
+} from '../libs/backup/backup';
+import type {
+  BookmarkBackupResponse,
+  ImportDataResponse,
+} from '../libs/backup/model';
 import {
   openOrFocusSavedPage,
   saveAndCloseTab,
   saveAndCloseTabGroup,
   saveAndCloseTabs,
-} from '../lib/save-tabs';
-import { executeSavedPageCommand } from '../lib/saved-page-operations';
+} from '../libs/saved-pages/save-tabs';
+import { executeSavedPageCommand } from '../libs/saved-pages/operations';
 import {
   archiveEligibleGroups,
   ensureUniqueGroupedTitles,
-} from '../lib/storage';
+} from '../libs/saved-pages/store';
 import {
   adoptMovedTaskGroup,
   clearTaskGroupBindingsForWindow,
@@ -23,7 +32,7 @@ import {
   reconcileTaskTab,
   restoreTaskGroupBindings,
   synchronizeBoundGroupTitles,
-} from '../lib/task-group-sync';
+} from '../libs/tab-group-sync/sync';
 
 const AUTO_ARCHIVE_ALARM = 'bok-auto-archive';
 const AUTO_ARCHIVE_INTERVAL_MINUTES = 60;
@@ -95,6 +104,28 @@ async function runAutoArchive(): Promise<void> {
   if (archivedGroups > 0) {
     console.log('[bok] automatically archived groups', { archivedGroups });
   }
+}
+
+async function triggerDailyBookmarkBackup(): Promise<void> {
+  try {
+    const result = await runBookmarkBackup();
+    if (result.status === 'failed') {
+      console.warn('[bok] daily bookmark backup will retry on the next open', {
+        error: result.state.lastError,
+      });
+    }
+  } catch (error) {
+    console.error('[bok] failed to run daily bookmark backup', error);
+  }
+}
+
+function isBokPageUrl(url: string | undefined): boolean {
+  if (!url) return false;
+  return new Set([
+    browser.runtime.getURL('/saved.html'),
+    browser.runtime.getURL('/bookmark-manager.html'),
+    browser.runtime.getURL('/options.html'),
+  ]).has(url);
 }
 
 async function installContextMenus(): Promise<void> {
@@ -256,6 +287,18 @@ export default defineBackground(() => {
     void refreshSaveGroupMenuState().catch(() => undefined);
   });
 
+  browser.tabs.onActivated.addListener(({ tabId }) => {
+    void browser.tabs
+      .get(tabId)
+      .then((tab) => {
+        if (isBokPageUrl(tab.pendingUrl || tab.url)) {
+          return triggerDailyBookmarkBackup();
+        }
+        return undefined;
+      })
+      .catch(() => undefined);
+  });
+
   browser.tabs.onMoved.addListener((tabId) => {
     scheduleTaskTabReconcile(tabId);
   });
@@ -309,6 +352,7 @@ export default defineBackground(() => {
     try {
       const result = await enqueueOperation(() => saveAndCloseTabs(tab.windowId));
       console.log('[bok] saved & closed tabs', result);
+      await triggerDailyBookmarkBackup();
     } catch (err) {
       console.error('[bok] failed to save tabs', err);
     }
@@ -324,6 +368,7 @@ export default defineBackground(() => {
           menuId,
           result,
         });
+        void triggerDailyBookmarkBackup();
       },
       (error) => {
         console.error('[bok] failed context menu command', {
@@ -335,6 +380,36 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (isBookmarkBackupCommand(message)) {
+      void runBookmarkBackup(message.force).then(
+        (result) => {
+          sendResponse({ ok: true, result } satisfies BookmarkBackupResponse);
+        },
+        (error) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          } satisfies BookmarkBackupResponse);
+        },
+      );
+      return true;
+    }
+
+    if (isImportDataCommand(message)) {
+      void enqueueOperation(() => importBokDataJson(message.json)).then(
+        (result) => {
+          sendResponse({ ok: true, result } satisfies ImportDataResponse);
+        },
+        (error) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          } satisfies ImportDataResponse);
+        },
+      );
+      return true;
+    }
+
     if (!isSavedPageCommand(message)) return undefined;
 
     void enqueueOperation(() =>

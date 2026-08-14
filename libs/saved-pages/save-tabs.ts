@@ -5,12 +5,13 @@ import {
   normalizeGroupTitle,
   reserveNumericGroupTitle,
 } from './group-names';
-import { addSession, getSessions } from './storage';
+import { getSessions } from './persistence';
+import { addSession } from './store';
 import {
   finishTaskGroupsSave,
   prepareTaskGroupsForSave,
-} from './task-group-sync';
-import type { SavedGroup, SavedSession, SavedTab } from './types';
+} from '../tab-group-sync/sync';
+import type { SavedGroup, SavedSession, SavedTab } from './model';
 
 type Tab = Browser.tabs.Tab;
 type CapturableTab = Tab & { id: number; url: string };
@@ -99,8 +100,13 @@ async function saveAndCloseSelection(
   options: SaveSelectionOptions,
 ): Promise<SaveResult> {
   const savedPageUrl = browser.runtime.getURL('/saved.html');
+  const internalPageUrls = new Set([
+    savedPageUrl,
+    browser.runtime.getURL('/bookmark-manager.html'),
+    browser.runtime.getURL('/options.html'),
+  ]);
   const allCapturable = selectedTabs
-    .map((tab) => toCapturableTab(tab, savedPageUrl))
+    .map((tab) => toCapturableTab(tab, internalPageUrls))
     .filter((tab): tab is CapturableTab => tab != null);
   const preparedTaskGroups = await prepareTaskGroupsForSave(windowId);
   const capturable = allCapturable.filter(
@@ -190,9 +196,12 @@ async function expandSelectedTabIdsAfterRecovery(
   );
 }
 
-function toCapturableTab(tab: Tab, savedPageUrl: string): CapturableTab | null {
+function toCapturableTab(
+  tab: Tab,
+  internalPageUrls: ReadonlySet<string>,
+): CapturableTab | null {
   const url = tab.pendingUrl || tab.url;
-  if (tab.id == null || !url || url === savedPageUrl) return null;
+  if (tab.id == null || !url || internalPageUrls.has(url)) return null;
   return { ...tab, id: tab.id, url };
 }
 
