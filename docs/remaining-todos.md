@@ -32,8 +32,8 @@
 
 ## 工程与发布整理
 
-- 移除或正式启用模板遗留的 Google 页面 content script；当前暂不处理。
-- 清理不再由保存页入口使用的旧 UI 文件，例如 `App.tsx`、`ActionMenu.tsx` 和
-  `InlineEditor.tsx`。
+- 已移除模板遗留的 Google 页面 content script，生产包不再声明无用的站点访问。
+- 清理不再由保存页入口使用的旧 UI 文件，例如 `App.tsx` 和 `InlineEditor.tsx`；
+  `ActionMenu.tsx` 已由书签管理页复用。
 - 更新包名、版本号、描述和 README，替换 starter 项目信息，形成可发布元数据。
 - 设置页按原计划继续延后，等出现需要用户配置的选项后再实现。

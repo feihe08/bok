@@ -25,5 +25,25 @@ browser restarts and extension reloads.
 
 Bok data remains local to that browser profile in `browser.storage.local`. Do not
 remove the extension or delete the profile directory unless you intend to remove
-its saved data. Use the dev output consistently while testing; the build output is
-a different unpacked extension identity and therefore has separate local storage.
+its saved data. Development and release builds use the same stable extension ID.
+Their data remains separate because `pnpm dev` uses a dedicated Chrome for Testing
+profile; do not load both builds into the same browser profile at the same time.
+
+## Release builds
+
+Run `pnpm build` for a Chrome release. The command type-checks the project, builds
+and zips the extension, validates the stable Chrome Web Store ID, and writes the
+versioned artifacts to `.output`:
+
+- `bok-<version>-chrome/`
+- `bok-chrome-<version>.zip`
+
+After validation, the same two artifacts are synchronized to
+`~/Library/Mobile Documents/com~apple~CloudDocs/Bok-development/releases`.
+Building the same version replaces that version in iCloud. Both `.output` and
+iCloud keep the highest three Chrome release versions and remove only older
+artifacts that match Bok's current or legacy release naming patterns. The iCloud
+`archive` directory and unrelated files are not changed.
+
+`pnpm zip` uses the same release workflow. Load the versioned iCloud directory in
+the regular Chrome profile; `.output` is for local build and verification work.
