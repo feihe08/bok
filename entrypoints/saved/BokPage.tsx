@@ -787,12 +787,20 @@ export default function BokPage() {
     setChangingGroupId(group.id);
 
     try {
-      await runCommand({
-        type: 'bok/set-group-archived',
-        sessionId: group.sessionId,
-        groupId: group.id,
-        archived: archiving,
-      });
+      await runCommand(
+        archiving
+          ? {
+              type: 'bok/set-group-archived',
+              sessionId: group.sessionId,
+              groupId: group.id,
+              archived: true,
+            }
+          : {
+              type: 'bok/restore-group',
+              sessionId: group.sessionId,
+              groupId: group.id,
+            },
+      );
       setActionNotice({
         type: 'success',
         message: archiving

@@ -238,6 +238,18 @@ assert.equal(
   isSavedPageCommand({ type: 'bok/set-auto-archive-period', period: 2 }),
   false,
 );
+assert.equal(
+  isSavedPageCommand({
+    type: 'bok/restore-group',
+    sessionId: 'session',
+    groupId: 'group',
+  }),
+  true,
+);
+assert.equal(
+  isSavedPageCommand({ type: 'bok/restore-group', sessionId: 'session' }),
+  false,
+);
 await fakeBrowser.storage.local.clear();
 
 const storageNow = Date.now();

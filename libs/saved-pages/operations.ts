@@ -84,6 +84,9 @@ export async function executeSavedPageCommand(
       }
       return null;
     }
+    case 'bok/restore-group':
+      await setGroupArchived(command.sessionId, command.groupId, false);
+      return null;
     case 'bok/set-group-archived':
       await setGroupArchived(
         command.sessionId,

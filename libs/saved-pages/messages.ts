@@ -25,6 +25,7 @@ export type SavedPageCommand =
     }
   | { type: 'bok/remove-group'; sessionId: string; groupId: string }
   | { type: 'bok/convert-group'; sessionId: string; groupId: string }
+  | { type: 'bok/restore-group'; sessionId: string; groupId: string }
   | {
       type: 'bok/rename-group';
       sessionId: string;
@@ -130,6 +131,7 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
       );
     case 'bok/remove-group':
     case 'bok/convert-group':
+    case 'bok/restore-group':
     case 'bok/deduplicate-group':
       return hasGroupId(command);
     case 'bok/rename-group':
