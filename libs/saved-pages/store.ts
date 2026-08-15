@@ -1,4 +1,4 @@
-import { archiveEligibleGroupsInMemory } from './auto-archive';
+import { archiveEligibleGroupsInMemory } from './auto-archive.ts';
 import {
   collectGroupedTitles,
   ensureUniqueGroupedTitlesInMemory,
@@ -7,15 +7,20 @@ import {
   normalizeGroupTitle,
   reserveTimestampedGroupTitle,
   type GroupedTitleChange,
-} from './group-names';
+} from './group-names.ts';
 import type {
   SavedGroup,
   SavedGroupColor,
   SavedGroupTaskStatus,
+  SavedPagesAutoArchivePeriod,
   SavedSession,
   SavedTab,
-} from './model';
-import { getSessions, writeSessions } from './persistence';
+} from './model.ts';
+import { getSessions, writeSessions } from './persistence.ts';
+import {
+  getSavedPagesAutoArchivePeriod,
+  setSavedPagesAutoArchivePeriod,
+} from './settings.ts';
 
 export interface ConvertGroupResult {
   groupTitle: string;
@@ -195,6 +200,7 @@ export async function setGroupArchived(
     group.archivedAt ??= Date.now();
   } else {
     group.archivedAt = null;
+    group.restoredAt = Date.now();
   }
   await writeSessions(sessions);
 }
@@ -225,11 +231,26 @@ export async function setGroupPinned(
 }
 
 export async function archiveEligibleGroups(now = Date.now()): Promise<number> {
+  const period = await getSavedPagesAutoArchivePeriod();
+  if (period === 'never') return 0;
   const sessions = await getSessions();
-  const archivedGroups = archiveEligibleGroupsInMemory(sessions, now);
+  const archivedGroups = archiveEligibleGroupsInMemory(sessions, now, period);
 
   if (archivedGroups > 0) await writeSessions(sessions);
   return archivedGroups;
+}
+
+export async function setAutoArchivePeriod(
+  period: SavedPagesAutoArchivePeriod,
+): Promise<void> {
+  const previousPeriod = await getSavedPagesAutoArchivePeriod();
+  await setSavedPagesAutoArchivePeriod(period);
+  try {
+    await archiveEligibleGroups();
+  } catch (error) {
+    await setSavedPagesAutoArchivePeriod(previousPeriod);
+    throw error;
+  }
 }
 
 export async function setGroupTaskStatus(

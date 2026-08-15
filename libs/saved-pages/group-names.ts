@@ -1,4 +1,4 @@
-import type { SavedGroup, SavedSession } from './model';
+import type { SavedGroup, SavedSession } from './model.ts';
 
 export interface GroupedTitleChange {
   sessionId: string;

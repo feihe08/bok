@@ -240,6 +240,7 @@ async function buildGroups(
       grouped,
       locked: false,
       pinned: false,
+      restoredAt: null,
       archivedAt: null,
       taskStatus: null,
       taskCompletedAt: null,

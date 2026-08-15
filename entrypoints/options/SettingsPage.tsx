@@ -12,11 +12,20 @@ import type {
   BookmarkBackupState,
   ImportDataResponse,
 } from '../../libs/backup/model';
+import {
+  isSavedPagesAutoArchivePeriod,
+  type SavedPagesAutoArchivePeriod,
+} from '../../libs/saved-pages/model';
+import type { SavedPageResponse } from '../../libs/saved-pages/messages';
+import {
+  getSavedPagesAutoArchivePeriod,
+  SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY,
+} from '../../libs/saved-pages/settings';
 
 type Theme = 'light' | 'dark';
 type DirectoryPermission = 'granted' | 'denied' | 'prompt' | 'missing';
 type Notice = { type: 'success' | 'error'; message: string };
-type SettingsSection = 'backup' | 'import';
+type SettingsSection = 'saved-pages' | 'backup' | 'import';
 
 const THEME_STORAGE_KEY = 'bok-theme';
 
@@ -29,6 +38,12 @@ function getSystemTheme(): Theme {
   return window.matchMedia('(prefers-color-scheme: dark)').matches
     ? 'dark'
     : 'light';
+}
+
+function getSettingsSection(): SettingsSection {
+  if (window.location.hash === '#import-settings') return 'import';
+  if (window.location.hash === '#backup-settings') return 'backup';
+  return 'saved-pages';
 }
 
 const storedTheme = getStoredTheme();
@@ -83,21 +98,29 @@ export default function SettingsPage() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const [theme, setTheme] = useState<Theme | null>(storedTheme);
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
-  const [activeSection, setActiveSection] = useState<SettingsSection>(
-    window.location.hash === '#import-settings' ? 'import' : 'backup',
-  );
+  const [autoArchivePeriod, setAutoArchivePeriod] =
+    useState<SavedPagesAutoArchivePeriod>(7);
+  const [activeSection, setActiveSection] =
+    useState<SettingsSection>(getSettingsSection);
   const activeTheme = theme ?? systemTheme;
 
   const refresh = useCallback(async () => {
-    const [nextState, nextDirectoryPermission, canReadBookmarks] =
+    const [
+      nextState,
+      nextDirectoryPermission,
+      canReadBookmarks,
+      nextAutoArchivePeriod,
+    ] =
       await Promise.all([
         getBookmarkBackupState(),
         getBookmarkBackupDirectoryPermission(),
         browser.permissions.contains({ permissions: ['bookmarks'] }),
+        getSavedPagesAutoArchivePeriod(),
       ]);
     setState(nextState);
     setDirectoryPermission(nextDirectoryPermission);
     setBookmarksPermission(canReadBookmarks);
+    setAutoArchivePeriod(nextAutoArchivePeriod);
   }, []);
 
   useEffect(() => {
@@ -111,7 +134,11 @@ export default function SettingsPage() {
       changes: Record<string, { newValue?: unknown }>,
       areaName: string,
     ) {
-      if (areaName === 'local' && changes[BOOKMARK_BACKUP_STATE_KEY]) {
+      if (
+        areaName === 'local' &&
+        (changes[BOOKMARK_BACKUP_STATE_KEY] ||
+          changes[SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY])
+      ) {
         void refresh();
       }
     }
@@ -130,9 +157,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     function onHashChange() {
-      setActiveSection(
-        window.location.hash === '#import-settings' ? 'import' : 'backup',
-      );
+      setActiveSection(getSettingsSection());
     }
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
@@ -143,6 +168,35 @@ export default function SettingsPage() {
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     setTheme(nextTheme);
+  }
+
+  async function changeAutoArchivePeriod(event: ChangeEvent<HTMLSelectElement>) {
+    const value = event.currentTarget.value;
+    const nextPeriod: unknown = value === 'never' ? value : Number(value);
+    if (!isSavedPagesAutoArchivePeriod(nextPeriod) || busy) return;
+
+    const previousPeriod = autoArchivePeriod;
+    setAutoArchivePeriod(nextPeriod);
+    setBusy('auto-archive');
+    setNotice(null);
+    try {
+      const response = (await browser.runtime.sendMessage({
+        type: 'bok/set-auto-archive-period',
+        period: nextPeriod,
+      })) as SavedPageResponse;
+      if (!response?.ok) {
+        throw new Error(response?.error || '后台没有返回保存结果');
+      }
+      setNotice({ type: 'success', message: '自动归档设置已保存。' });
+    } catch (error) {
+      setAutoArchivePeriod(previousPeriod);
+      setNotice({
+        type: 'error',
+        message: `自动归档设置保存失败：${error instanceof Error ? error.message : '请重试'}`,
+      });
+    } finally {
+      setBusy('');
+    }
   }
 
   async function executeBackupNow() {
@@ -260,7 +314,7 @@ export default function SettingsPage() {
       } else {
         setNotice({
           type: 'success',
-          message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个分组和 ${result.importedTabs} 个标签；跳过 ${result.skippedDuplicateGroups} 个重复分组；按超过一周规则归档 ${result.archivedGroups} 个分组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
+          message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个分组和 ${result.importedTabs} 个标签；跳过 ${result.skippedDuplicateGroups} 个重复分组；按自动归档设置归档 ${result.archivedGroups} 个分组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
         });
       }
     } catch (error) {
@@ -308,6 +362,12 @@ export default function SettingsPage() {
         <aside className="settings-sidebar">
           <nav aria-label="设置分类">
             <a
+              href="#saved-pages-settings"
+              aria-current={activeSection === 'saved-pages' ? 'location' : undefined}
+            >
+              已保存网页
+            </a>
+            <a
               href="#backup-settings"
               aria-current={activeSection === 'backup' ? 'location' : undefined}
             >
@@ -325,8 +385,48 @@ export default function SettingsPage() {
         <main id="settings-content" className="settings-content" tabIndex={-1}>
           <header className="settings-header">
             <h1>设置</h1>
-            <p>管理 Chrome 书签栏和 Bok 已保存网页的本地备份。</p>
+            <p>管理 Bok 已保存网页、Chrome 书签栏和本地备份。</p>
           </header>
+
+          <section
+            id="saved-pages-settings"
+            className="settings-section"
+            aria-labelledby="saved-pages-heading"
+          >
+            <div className="settings-section__heading">
+              <h2 id="saved-pages-heading">已保存网页</h2>
+              <p>设置 Bok 如何整理已保存的分组。</p>
+            </div>
+            <dl className="settings-list">
+              <div className="settings-row">
+                <dt>
+                  <label htmlFor="auto-archive-period">自动归档</label>
+                </dt>
+                <dd>
+                  <div className="settings-select-control">
+                    <select
+                      id="auto-archive-period"
+                      className="settings-select"
+                      value={String(autoArchivePeriod)}
+                      disabled={Boolean(busy)}
+                      aria-describedby="auto-archive-period-help"
+                      onChange={(event) => void changeAutoArchivePeriod(event)}
+                    >
+                      <option value="1">当天（1 天）</option>
+                      <option value="3">3 天</option>
+                      <option value="7">7 天</option>
+                      <option value="30">1 个月（30 天）</option>
+                      <option value="never">永不</option>
+                    </select>
+                    <p id="auto-archive-period-help">
+                      从保存或最近恢复的时间开始计算，只影响后续自动归档；Todo、Doing
+                      和固定组仍会跳过。
+                    </p>
+                  </div>
+                </dd>
+              </div>
+            </dl>
+          </section>
 
           <section
             id="backup-settings"

@@ -4,6 +4,7 @@ import type {
 } from './messages';
 import { openSavedGroup } from './restore-tabs';
 import {
+  setAutoArchivePeriod,
   convertGroupToBrowserGroup,
   deduplicateGroup,
   getSavedGroup,
@@ -39,6 +40,10 @@ export async function executeSavedPageCommand(
   switch (command.type) {
     case 'bok/import-sessions':
       return importSessionsJson(command.json);
+    case 'bok/set-auto-archive-period': {
+      await setAutoArchivePeriod(command.period);
+      return null;
+    }
     case 'bok/remove-tab':
       await removeTab(command.sessionId, command.tabId);
       await ignoreTaskTab(command.sessionId, command.tabId);

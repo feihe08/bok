@@ -4,6 +4,21 @@
  */
 export type TaskStatus = 'todo' | 'doing' | 'done';
 
+/** Automatic archive period in days; `never` disables automatic archive. */
+export type SavedPagesAutoArchivePeriod = 1 | 3 | 7 | 30 | 'never';
+
+export function isSavedPagesAutoArchivePeriod(
+  value: unknown,
+): value is SavedPagesAutoArchivePeriod {
+  return (
+    value === 1 ||
+    value === 3 ||
+    value === 7 ||
+    value === 30 ||
+    value === 'never'
+  );
+}
+
 /** A globally unique, immutable UUID v4. */
 export type Id = string;
 
@@ -67,6 +82,8 @@ export interface SavedGroup {
   locked: boolean;
   /** 固定后置顶显示，并跳过自动归档。 */
   pinned: boolean;
+  /** 最近一次手动从归档恢复的时间；从未恢复时为 null。 */
+  restoredAt: number | null;
   /** 归档时间；null 表示当前未归档。 */
   archivedAt: number | null;
   /** 用户主动将分组标记为任务后维护的状态；null 表示普通分组。 */

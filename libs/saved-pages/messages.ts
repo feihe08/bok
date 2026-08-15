@@ -1,12 +1,20 @@
-import type { SavedGroupTaskStatus } from './model';
-import type { ImportSessionsResult } from './persistence';
-import type { ConvertGroupResult } from './store';
+import type {
+  SavedGroupTaskStatus,
+  SavedPagesAutoArchivePeriod,
+} from './model.ts';
+import { isSavedPagesAutoArchivePeriod } from './model.ts';
+import type { ImportSessionsResult } from './persistence.ts';
+import type { ConvertGroupResult } from './store.ts';
 
 export type OpenMode = 'tabs' | 'tab-group';
 export type OpenDestination = 'current-window' | 'new-window';
 
 export type SavedPageCommand =
   | { type: 'bok/import-sessions'; json: string }
+  | {
+      type: 'bok/set-auto-archive-period';
+      period: SavedPagesAutoArchivePeriod;
+    }
   | { type: 'bok/remove-tab'; sessionId: string; tabId: string }
   | {
       type: 'bok/rename-tab';
@@ -105,6 +113,9 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
   const command = value as Record<string, unknown>;
   if (command.type === 'bok/import-sessions') {
     return typeof command.json === 'string';
+  }
+  if (command.type === 'bok/set-auto-archive-period') {
+    return isSavedPagesAutoArchivePeriod(command.period);
   }
   if (typeof command.sessionId !== 'string') return false;
 

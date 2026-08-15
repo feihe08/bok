@@ -1,6 +1,6 @@
 import { browser } from 'wxt/browser';
-import { archiveEligibleGroupsInMemory } from './auto-archive';
-import { mergeImportedSessions } from './session-import';
+import { archiveEligibleGroupsInMemory } from './auto-archive.ts';
+import { mergeImportedSessions } from './session-import.ts';
 import type {
   DirectoryPath,
   SavedGroup,
@@ -8,7 +8,8 @@ import type {
   SavedGroupTaskStatus,
   SavedSession,
   SavedTab,
-} from './model';
+} from './model.ts';
+import { getSavedPagesAutoArchivePeriod } from './settings.ts';
 
 const SESSIONS_KEY = 'sessions';
 const SESSIONS_RECOVERY_KEY = 'sessionsRecovery';
@@ -77,6 +78,7 @@ type StoredGroup = Omit<
   | 'createdAt'
   | 'locked'
   | 'pinned'
+  | 'restoredAt'
   | 'taskStatus'
   | 'taskCompletedAt'
   | 'tabs'
@@ -86,6 +88,7 @@ type StoredGroup = Omit<
   createdAt?: unknown;
   locked?: unknown;
   pinned?: unknown;
+  restoredAt?: unknown;
   taskStatus?: unknown;
   taskCompletedAt?: unknown;
   /** Legacy field used before task state became opt-in. */
@@ -144,7 +147,7 @@ function normalizeGroupColor(color: unknown): SavedGroupColor | undefined {
     : undefined;
 }
 
-function normalizeArchivedAt(value: unknown): number | null {
+function normalizeNullableTimestamp(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
@@ -178,7 +181,7 @@ function normalizeTaskCompletedAt(
   taskCompletedAt: unknown,
   taskStatus: SavedGroupTaskStatus | null,
 ): number | null {
-  return taskStatus === 'done' ? normalizeArchivedAt(taskCompletedAt) : null;
+  return taskStatus === 'done' ? normalizeNullableTimestamp(taskCompletedAt) : null;
 }
 
 function normalizeSession(session: StoredSession): SavedSession {
@@ -192,11 +195,12 @@ function normalizeSession(session: StoredSession): SavedSession {
           ...group,
           title: typeof group.title === 'string' ? group.title : '',
           createdAt,
-          archivedAt: normalizeArchivedAt(group.archivedAt),
+          archivedAt: normalizeNullableTimestamp(group.archivedAt),
           color: normalizeGroupColor(group.color),
           locked: group.locked === true,
           grouped: group.grouped === true || normalizedTaskStatus !== null,
           pinned: group.pinned === true,
+          restoredAt: normalizeNullableTimestamp(group.restoredAt),
           taskStatus: normalizedTaskStatus,
           taskCompletedAt: normalizeTaskCompletedAt(
             taskCompletedAt,
@@ -215,7 +219,7 @@ function normalizeSession(session: StoredSession): SavedSession {
                 typeof tab.favIconUrl === 'string' ? tab.favIconUrl : undefined,
               createdAt: tabCreatedAt,
               updatedAt: normalizeCreatedAt(tab.updatedAt, tabCreatedAt),
-              archivedAt: normalizeArchivedAt(tab.archivedAt),
+              archivedAt: normalizeNullableTimestamp(tab.archivedAt),
               tags: normalizeTags(tab.tags),
               directory: normalizeDirectory(tab.directory),
               taskStatus: normalizedTabTaskStatus,
@@ -324,6 +328,12 @@ function validateV1Session(value: Record<string, unknown>, prefix: string): stri
     if (typeof groupValue.grouped !== 'boolean') issues.push(`${groupPrefix}.grouped 无效`);
     if (typeof groupValue.locked !== 'boolean') issues.push(`${groupPrefix}.locked 无效`);
     if (typeof groupValue.pinned !== 'boolean') issues.push(`${groupPrefix}.pinned 无效`);
+    if (
+      groupValue.restoredAt !== undefined &&
+      !isNullableFiniteNumber(groupValue.restoredAt)
+    ) {
+      issues.push(`${groupPrefix}.restoredAt 无效`);
+    }
     if (!isNullableFiniteNumber(groupValue.archivedAt)) {
       issues.push(`${groupPrefix}.archivedAt 无效`);
     }
@@ -594,12 +604,19 @@ export async function importSessionsJson(json: string): Promise<ImportSessionsRe
   }
   if (validated.sessions.length === 0) throw new Error('导入文件没有保存记录');
 
-  const current = await readStoredSessions();
+  const [current, autoArchivePeriod] = await Promise.all([
+    readStoredSessions(),
+    getSavedPagesAutoArchivePeriod(),
+  ]);
   const existingSessions = current.sessions.map(normalizeSession);
   const importedSessions = validated.sessions.map(normalizeSession);
   const merged = mergeImportedSessions(existingSessions, importedSessions);
   const now = Date.now();
-  const archivedGroups = archiveEligibleGroupsInMemory(merged.sessions, now);
+  const archivedGroups = archiveEligibleGroupsInMemory(
+    merged.sessions,
+    now,
+    autoArchivePeriod,
+  );
   const envelope: StoredEnvelope = {
     schemaVersion: STORAGE_SCHEMA_VERSION,
     revision: current.store.revision + 1,

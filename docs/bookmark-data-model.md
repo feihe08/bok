@@ -115,6 +115,8 @@ export type SavedGroupColor =
   | 'red'
   | 'yellow';
 
+export type SavedPagesAutoArchivePeriod = 1 | 3 | 7 | 30 | 'never';
+
 export interface SavedGroup {
   id: string;
   title: string;
@@ -123,6 +125,7 @@ export interface SavedGroup {
   grouped: boolean;
   locked: boolean;
   pinned: boolean;
+  restoredAt: number | null;
   archivedAt: number | null;
   taskStatus: 'todo' | 'doing' | 'done' | null;
   taskCompletedAt: number | null;
@@ -164,14 +167,17 @@ SavedSession
 每个 `SavedTab` 仍然拥有自己的唯一目录。`color` 只允许 Chrome 支持的九种标签组
 颜色。`locked: true` 表示该组可以重复打开，但不能删除整组或其中的单个标签，也不能
 执行组内去重；锁定不影响重命名、归档、固定或任务标记。`pinned: true` 表示当前视图
-置顶，并且自动归档跳过该组。`archivedAt` 是归档状态的唯一来源。
+置顶，并且自动归档跳过该组。`restoredAt` 记录最近一次手动恢复时间；自动归档会从
+`createdAt` 与 `restoredAt` 中较晚的时间重新计算所选周期。`archivedAt` 仍是归档
+状态的唯一来源。
 
 `taskStatus: null` 表示未标记为任务；用户主动将标签页或分组标记为任务时，第一次状态
 固定为 `doing`，之后可以切换为 `todo`、`doing` 或 `done`。进入 `done` 时写入
 `taskCompletedAt`，离开 `done` 或取消任务时清空。普通分组首次被标记为任务时还会按
 上述唯一命名规则转换为标签组，但不会自动打开浏览器标签。取消任务不会把 `grouped`
-改回 `false`。新保存的组默认 `locked: false`、`pinned: false`、`archivedAt: null`、
-`taskStatus: null`、`taskCompletedAt: null`；来自 Chrome 标签组的记录使用
+改回 `false`。新保存的组默认 `locked: false`、`pinned: false`、
+`restoredAt: null`、`archivedAt: null`、`taskStatus: null`、
+`taskCompletedAt: null`；来自 Chrome 标签组的记录使用
 `grouped: true`，独立标签形成的普通分组使用 `grouped: false`。
 
 
@@ -190,6 +196,7 @@ SavedSession
       "grouped": true,
       "locked": false,
       "pinned": false,
+      "restoredAt": null,
       "archivedAt": null,
       "taskStatus": "doing",
       "taskCompletedAt": null,
@@ -230,6 +237,10 @@ SavedSession
 - `revision` 每次完整写入时递增，用于辨识数据快照。
 - `sessions` 保存完整的 `SavedSession[]`。
 
+自动归档周期独立保存在 primitive key `savedPagesAutoArchivePeriod` 中，可选值为
+`1`、`3`、`7`、`30` 或 `"never"`。缺失或非法值回退为默认的 `7` 天；`30` 按
+30 × 24 小时计算，`"never"` 表示永不自动归档。
+
 旧版直接存储的 `SavedSession[]` 被视为 v0，仍可正常读取；第一次新增、修改或
 删除记录时会写成 v1。若检测到高于当前支持范围的版本，Bok 会停止读取和写入，
 避免旧版本扩展覆盖较新的数据。
@@ -249,6 +260,7 @@ session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原
 - 标签会去空、去重
 - 缺失或非 `true` 的 `locked` 转换为 `false`
 - 缺失或非 `true` 的 `pinned` 转换为 `false`
+- 缺失的 `restoredAt` 转换为 `null`；v1 中除 `null` 或有限数字以外的值会按损坏记录隔离
 - 缺失或非法的组/标签页 `createdAt` 使用所属 session 或标签组的创建时间
 - 缺失或非法的组/标签页 `archivedAt` 转换为 `null`
 - 合法的 `taskStatus`（`todo`、`doing`、`done`）原样保留
@@ -326,15 +338,18 @@ v1 envelope 重新写入存储。
 
 ## 保存网页的归档与组内去重
 
-- 归档只写入标签组的时间戳，不删除数据，也不改写标签页的兼容归档字段。
+- 归档与恢复不会删除数据，也不改写标签页的兼容归档字段。
 - `group.archivedAt === null` 表示当前组，非空表示已归档组。保存页默认展示当前组，
   归档视图展示已归档组并提供恢复操作。
 - 手动归档不检查年龄、任务状态或固定状态。固定组手动归档时，同一次写入先设置
-  `pinned: false`，再写入 `archivedAt`；恢复只清空 `archivedAt`，不会重新固定。
-- 自动归档由 Chrome alarms 每小时触发，并在后台启动时补充执行。只有创建时间超过
-  7 天、组和所有标签页均不处于 `todo` 或 `doing`、`pinned: false` 且尚未归档的组
-  才符合条件；`done` 和未标记任务的组可以自动归档。设备休眠期间不会主动唤醒，
-  恢复运行后再检查。
+  `pinned: false`，再写入 `archivedAt`。恢复会清空 `archivedAt` 并把当前时间写入
+  `restoredAt`，不会修改 `createdAt` 或重新固定；再次手动归档保留 `restoredAt`。
+- 自动归档由 Chrome alarms 每小时触发，并在后台启动时补充执行。周期可设为 1、3、
+  7、30 天或永不，默认 7 天。只有距 `max(createdAt, restoredAt ?? createdAt)` 严格
+  超过所选周期、组和所有标签页均不处于 `todo` 或 `doing`、`pinned: false` 且尚未
+  归档的组才符合条件；`done` 和未标记任务的组可以自动归档。设备休眠期间不会主动
+  唤醒，恢复运行后再检查。修改设置后会立即按新周期执行一次检查，但不会改变已经
+  归档的组。
 - 固定组在当前视图置顶；固定与锁定是两个独立状态。
 - 组内去重只检查目标组。比较键为 `new URL(url).href` 的完整规范 URL，查询
   参数和 hash 都参与比较；历史坏 URL 回退为去除首尾空格的原字符串。
