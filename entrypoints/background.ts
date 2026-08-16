@@ -100,9 +100,12 @@ async function ensureAutoArchiveAlarm(): Promise<void> {
 }
 
 async function runAutoArchive(): Promise<void> {
-  const archivedGroups = await archiveEligibleGroups();
-  if (archivedGroups > 0) {
-    console.log('[bok] automatically archived groups', { archivedGroups });
+  const { archivedSessions, archivedGroups } = await archiveEligibleGroups();
+  if (archivedSessions + archivedGroups > 0) {
+    console.log('[bok] automatically archived saved pages', {
+      archivedSessions,
+      archivedGroups,
+    });
   }
 }
 

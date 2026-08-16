@@ -15,6 +15,25 @@ export type SavedPageCommand =
       type: 'bok/set-auto-archive-period';
       period: SavedPagesAutoArchivePeriod;
     }
+  | {
+      type: 'bok/open-session';
+      sessionId: string;
+      destination: OpenDestination;
+    }
+  | { type: 'bok/remove-session'; sessionId: string }
+  | { type: 'bok/rename-session'; sessionId: string; title: string }
+  | { type: 'bok/set-session-pinned'; sessionId: string; pinned: boolean }
+  | {
+      type: 'bok/set-session-archived';
+      sessionId: string;
+      archived: boolean;
+    }
+  | {
+      type: 'bok/set-session-task-status';
+      sessionId: string;
+      status: SavedGroupTaskStatus | null;
+    }
+  | { type: 'bok/set-session-locked'; sessionId: string; locked: boolean }
   | { type: 'bok/remove-tab'; sessionId: string; tabId: string }
   | {
       type: 'bok/rename-tab';
@@ -87,12 +106,21 @@ export interface OpenGroupResult {
   convertedGroup?: ConvertGroupResult;
 }
 
+export interface OpenSessionResult {
+  openedTabs: number;
+  openedGroups: number;
+  destination: OpenDestination;
+  /** True when a single-group session focused its existing synced group. */
+  reusedSyncedGroup?: boolean;
+}
+
 export interface DeduplicateGroupResult {
   removedTabs: number;
 }
 
 export type SavedPageCommandResult =
   | OpenGroupResult
+  | OpenSessionResult
   | DeduplicateGroupResult
   | ConvertGroupResult
   | ImportSessionsResult
@@ -121,6 +149,27 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
   if (typeof command.sessionId !== 'string') return false;
 
   switch (command.type) {
+    case 'bok/open-session':
+      return (
+        command.destination === 'current-window' ||
+        command.destination === 'new-window'
+      );
+    case 'bok/remove-session':
+      return true;
+    case 'bok/rename-session':
+      return typeof command.title === 'string';
+    case 'bok/set-session-pinned':
+      return typeof command.pinned === 'boolean';
+    case 'bok/set-session-archived':
+      return typeof command.archived === 'boolean';
+    case 'bok/set-session-locked':
+      return typeof command.locked === 'boolean';
+    case 'bok/set-session-task-status':
+      return (
+        command.status === null ||
+        (typeof command.status === 'string' &&
+          GROUP_TASK_STATUSES.has(command.status as SavedGroupTaskStatus))
+      );
     case 'bok/remove-tab':
       return typeof command.tabId === 'string';
     case 'bok/rename-tab':

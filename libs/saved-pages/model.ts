@@ -50,7 +50,7 @@ export interface SavedTab {
   taskStatus: TaskStatus | null;
   /** 当前任务进入 Done 状态的时间；非 Done 任务为 null。 */
   taskCompletedAt: number | null;
-  /** Legacy compatibility only; group.archivedAt is the archive source of truth. */
+  /** Legacy-compatible tab-level archive state. */
   archivedAt: number | null;
 }
 
@@ -67,35 +67,49 @@ export type SavedGroupColor =
 
 export type SavedGroupTaskStatus = TaskStatus;
 
-/** One ordered Bok group. `grouped` distinguishes ordinary groups from Chrome tab groups. */
+/** One ordered Chrome tab group saved by Bok. */
 export interface SavedGroup {
   id: Id;
-  /** 分组名称；普通分组可重名，标签组必须使用唯一的非空名称。 */
+  /** 浏览器标签组名称；必须使用唯一的非空名称。 */
   title: string;
   /** 分组进入 Bok 的时间。 */
   createdAt: number;
   /** Chrome tab group color, kept so the page can render it like the browser does */
   color?: SavedGroupColor;
-  /** true 表示标签组：按 Chrome 标签组打开，并参与运行期同步。 */
-  grouped: boolean;
+  /** Every v3 Group is a real Chrome tab group. */
+  grouped: true;
   /** 锁定后仍可打开，但不能从 Bok 删除 */
   locked: boolean;
-  /** 固定后置顶显示，并跳过自动归档。 */
+  /** 固定后跳过自动归档；session 内仍保留原始顺序。 */
   pinned: boolean;
   /** 最近一次手动从归档恢复的时间；从未恢复时为 null。 */
   restoredAt: number | null;
   /** 归档时间；null 表示当前未归档。 */
   archivedAt: number | null;
-  /** 用户主动将分组标记为任务后维护的状态；null 表示普通分组。 */
+  /** 用户主动将标签组标记为任务后维护的状态；null 表示未标记为任务。 */
   taskStatus: SavedGroupTaskStatus | null;
   /** 当前任务进入 Done 状态的时间；非 Done 任务为 null。 */
   taskCompletedAt: number | null;
   tabs: SavedTab[];
 }
 
-/** One click of the extension icon produces one session. */
-export interface SavedSession {
+export type SavedSessionItem =
+  | { type: 'tab'; tab: SavedTab }
+  | { type: 'group'; group: SavedGroup };
+
+export interface SavedSessionState {
+  /** Session title; new saves use an empty title and show a generated fallback. */
+  title: string;
+  locked: boolean;
+  pinned: boolean;
+  restoredAt: number | null;
+  archivedAt: number | null;
+  taskStatus: TaskStatus | null;
+  taskCompletedAt: number | null;
+}
+
+export interface SavedSession extends SavedSessionState {
   id: Id;
   createdAt: number;
-  groups: SavedGroup[];
+  items: SavedSessionItem[];
 }

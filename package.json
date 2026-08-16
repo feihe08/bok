@@ -12,7 +12,9 @@
     "zip": "pnpm build",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "check:session-import": "node scripts/check-session-import.mjs",
+    "check:session-import": "jiti scripts/check-session-import.mjs",
+    "check:session-operations": "jiti scripts/check-session-operations.mjs",
+    "check:bookmark-backup": "jiti scripts/check-bookmark-backup.mjs",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

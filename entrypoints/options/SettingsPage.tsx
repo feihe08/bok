@@ -1,11 +1,21 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react';
 import { browser } from 'wxt/browser';
 import {
   BOOKMARK_BACKUP_STATE_KEY,
   chooseBookmarkBackupDirectory,
+  getBackupDeviceName,
   getBookmarkBackupDirectoryPermission,
   getBookmarkBackupState,
   requestBookmarkBackupDirectoryPermission,
+  saveBackupDeviceName,
+  takeOverBackupDeviceName,
 } from '../../libs/backup/backup';
 import type {
   BookmarkBackupResponse,
@@ -20,14 +30,16 @@ import type { SavedPageResponse } from '../../libs/saved-pages/messages';
 import {
   getSavedPagesAutoArchivePeriod,
   SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY,
+  THEME_PREFERENCE_KEY,
 } from '../../libs/saved-pages/settings';
 
 type Theme = 'light' | 'dark';
 type DirectoryPermission = 'granted' | 'denied' | 'prompt' | 'missing';
 type Notice = { type: 'success' | 'error'; message: string };
-type SettingsSection = 'saved-pages' | 'backup' | 'import';
+type SettingsSection = 'machine' | 'saved-pages' | 'backup' | 'import';
 
 const THEME_STORAGE_KEY = 'bok-theme';
+const BACKUP_DEVICE_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
 
 function getStoredTheme(): Theme | null {
   const value = localStorage.getItem(THEME_STORAGE_KEY);
@@ -43,7 +55,8 @@ function getSystemTheme(): Theme {
 function getSettingsSection(): SettingsSection {
   if (window.location.hash === '#import-settings') return 'import';
   if (window.location.hash === '#backup-settings') return 'backup';
-  return 'saved-pages';
+  if (window.location.hash === '#saved-pages-settings') return 'saved-pages';
+  return 'machine';
 }
 
 const storedTheme = getStoredTheme();
@@ -88,6 +101,24 @@ function permissionLabel(permission: DirectoryPermission): string {
   return '需要重新授权';
 }
 
+function isBackupDeviceNameConflict(error: unknown): boolean {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'backup-device-name-conflict'
+  ) {
+    return true;
+  }
+  return error instanceof Error && /已被.*使用|冲突|占用/.test(error.message);
+}
+
+function triggerForceBackup(): void {
+  void browser.runtime
+    .sendMessage({ type: 'bok/bookmark-backup', force: true })
+    .catch(() => undefined);
+}
+
 export default function SettingsPage() {
   const [state, setState] = useState<BookmarkBackupState | null>(null);
   const [directoryPermission, setDirectoryPermission] =
@@ -96,12 +127,22 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const deviceNameInputRef = useRef<HTMLInputElement>(null);
+  const deviceNameEditButtonRef = useRef<HTMLButtonElement>(null);
   const [theme, setTheme] = useState<Theme | null>(storedTheme);
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
   const [autoArchivePeriod, setAutoArchivePeriod] =
     useState<SavedPagesAutoArchivePeriod>(7);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(getSettingsSection);
+  const [backupDeviceName, setBackupDeviceName] = useState('personal');
+  const [savedBackupDeviceName, setSavedBackupDeviceName] =
+    useState('personal');
+  const [isEditingBackupDeviceName, setIsEditingBackupDeviceName] =
+    useState(false);
+  const [backupDeviceNameError, setBackupDeviceNameError] = useState('');
+  const [canTakeOverBackupDeviceName, setCanTakeOverBackupDeviceName] =
+    useState(false);
   const activeTheme = theme ?? systemTheme;
 
   const refresh = useCallback(async () => {
@@ -125,6 +166,15 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void refresh();
+    void getBackupDeviceName()
+      .then((deviceName) => {
+        setBackupDeviceName(deviceName);
+        setSavedBackupDeviceName(deviceName);
+      })
+      .catch(() => {
+        setIsEditingBackupDeviceName(true);
+        setBackupDeviceNameError('无法读取机器名称，请重新加载后重试。');
+      });
     void browser.runtime
       .sendMessage({ type: 'bok/bookmark-backup' })
       .then(refresh)
@@ -145,6 +195,38 @@ export default function SettingsPage() {
     browser.storage.onChanged.addListener(onStorageChanged);
     return () => browser.storage.onChanged.removeListener(onStorageChanged);
   }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const legacyTheme = getStoredTheme();
+
+    void browser.storage.local
+      .get(THEME_PREFERENCE_KEY)
+      .then((stored) => {
+        if (legacyTheme) {
+          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
+          return browser.storage.local.set({
+            [THEME_PREFERENCE_KEY]: legacyTheme,
+          }).then(triggerForceBackup);
+        }
+
+        const preference = stored[THEME_PREFERENCE_KEY];
+        if (
+          cancelled ||
+          (preference !== 'light' && preference !== 'dark')
+        ) {
+          return;
+        }
+        localStorage.setItem(THEME_STORAGE_KEY, preference);
+        document.documentElement.dataset.theme = preference;
+        setTheme(preference);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -168,6 +250,10 @@ export default function SettingsPage() {
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     setTheme(nextTheme);
+    void browser.storage.local
+      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
+      .then(triggerForceBackup)
+      .catch(() => undefined);
   }
 
   async function changeAutoArchivePeriod(event: ChangeEvent<HTMLSelectElement>) {
@@ -188,12 +274,133 @@ export default function SettingsPage() {
         throw new Error(response?.error || '后台没有返回保存结果');
       }
       setNotice({ type: 'success', message: '自动归档设置已保存。' });
+      triggerForceBackup();
     } catch (error) {
       setAutoArchivePeriod(previousPeriod);
       setNotice({
         type: 'error',
         message: `自动归档设置保存失败：${error instanceof Error ? error.message : '请重试'}`,
       });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function focusBackupDeviceNameInput(): void {
+    requestAnimationFrame(() => deviceNameInputRef.current?.focus());
+  }
+
+  function finishEditingBackupDeviceName(deviceName: string): void {
+    setBackupDeviceName(deviceName);
+    setSavedBackupDeviceName(deviceName);
+    setIsEditingBackupDeviceName(false);
+    requestAnimationFrame(() => deviceNameEditButtonRef.current?.focus());
+  }
+
+  function startEditingBackupDeviceName(): void {
+    setBackupDeviceName(savedBackupDeviceName);
+    setBackupDeviceNameError('');
+    setCanTakeOverBackupDeviceName(false);
+    setIsEditingBackupDeviceName(true);
+    requestAnimationFrame(() => {
+      deviceNameInputRef.current?.focus();
+      deviceNameInputRef.current?.select();
+    });
+  }
+
+  function cancelEditingBackupDeviceName(): void {
+    setBackupDeviceName(savedBackupDeviceName);
+    setBackupDeviceNameError('');
+    setCanTakeOverBackupDeviceName(false);
+    setIsEditingBackupDeviceName(false);
+    requestAnimationFrame(() => deviceNameEditButtonRef.current?.focus());
+  }
+
+  async function ensureBackupDirectoryReady(): Promise<boolean> {
+    if (!state?.directoryName) {
+      setBackupDeviceNameError('请先选择备份文件夹，再重新绑定机器名称。');
+      focusBackupDeviceNameInput();
+      return false;
+    }
+
+    const permission = await requestBookmarkBackupDirectoryPermission();
+    if (permission !== 'granted') {
+      setBackupDeviceNameError('请先重新授权备份文件夹，再重新绑定机器名称。');
+      focusBackupDeviceNameInput();
+      return false;
+    }
+    return true;
+  }
+
+  async function saveDeviceName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+
+    const normalizedName = backupDeviceName.trim().toLowerCase();
+    setBackupDeviceName(normalizedName);
+    setBackupDeviceNameError('');
+    setCanTakeOverBackupDeviceName(false);
+    setNotice(null);
+
+    if (!BACKUP_DEVICE_NAME_PATTERN.test(normalizedName)) {
+      setBackupDeviceNameError('使用 1–32 个小写字母、数字、- 或 _。');
+      focusBackupDeviceNameInput();
+      return;
+    }
+
+    setBusy('device-name');
+    try {
+      const nextState = await saveBackupDeviceName(normalizedName);
+      setState(nextState);
+      finishEditingBackupDeviceName(nextState.deviceName);
+      setNotice({ type: 'success', message: '机器名称已保存。' });
+      if (directoryPermission === 'granted' && bookmarksPermission) {
+        triggerForceBackup();
+      }
+    } catch (error) {
+      if (isBackupDeviceNameConflict(error)) {
+        setCanTakeOverBackupDeviceName(true);
+        setBackupDeviceNameError(
+          '这个名称已被其他电脑使用。请更换名称，或重新绑定此名称。',
+        );
+      } else {
+        setBackupDeviceNameError(
+          error instanceof Error ? error.message : '无法保存机器名称，请重试。',
+        );
+      }
+      focusBackupDeviceNameInput();
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function takeOverDeviceName() {
+    if (busy || !canTakeOverBackupDeviceName) return;
+    if (
+      !window.confirm(
+        `重新绑定“${backupDeviceName}”后，旧安装将不能再使用此名称。继续？`,
+      )
+    ) {
+      focusBackupDeviceNameInput();
+      return;
+    }
+
+    setBusy('device-name');
+    setNotice(null);
+    try {
+      if (!(await ensureBackupDirectoryReady())) return;
+      const nextState = await takeOverBackupDeviceName(backupDeviceName);
+      setState(nextState);
+      setBackupDeviceNameError('');
+      setCanTakeOverBackupDeviceName(false);
+      finishEditingBackupDeviceName(nextState.deviceName);
+      setNotice({ type: 'success', message: '机器名称已重新绑定。' });
+      if (bookmarksPermission) triggerForceBackup();
+    } catch (error) {
+      setBackupDeviceNameError(
+        error instanceof Error ? error.message : '无法重新绑定机器名称，请重试。',
+      );
+      focusBackupDeviceNameInput();
     } finally {
       setBusy('');
     }
@@ -212,7 +419,10 @@ export default function SettingsPage() {
     if (response.result.status === 'failed') {
       throw new Error(response.result.state.lastError || '备份失败');
     }
-    setNotice({ type: 'success', message: '三份最新备份已更新；每周历史包已按规则处理。' });
+    setNotice({
+      type: 'success',
+      message: '四份最新备份已更新；本机和共享每周历史包已按规则处理。',
+    });
     await refresh();
   }
 
@@ -314,7 +524,7 @@ export default function SettingsPage() {
       } else {
         setNotice({
           type: 'success',
-          message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个分组和 ${result.importedTabs} 个标签；跳过 ${result.skippedDuplicateGroups} 个重复分组；按自动归档设置归档 ${result.archivedGroups} 个分组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
+          message: `已导入 ${result.importedSessions} 个会话、${result.importedGroups} 个标签组和 ${result.importedTabs} 个标签；跳过 ${result.skippedDuplicateGroups} 个重复标签组；按自动归档设置归档 ${result.archivedSessions} 个会话和 ${result.archivedGroups} 个标签组${result.renamedGroups > 0 ? `；${result.renamedGroups} 个标签组因重名已追加数字后缀` : ''}。`,
         });
       }
     } catch (error) {
@@ -362,6 +572,12 @@ export default function SettingsPage() {
         <aside className="settings-sidebar">
           <nav aria-label="设置分类">
             <a
+              href="#machine-settings"
+              aria-current={activeSection === 'machine' ? 'location' : undefined}
+            >
+              机器
+            </a>
+            <a
               href="#saved-pages-settings"
               aria-current={activeSection === 'saved-pages' ? 'location' : undefined}
             >
@@ -385,8 +601,107 @@ export default function SettingsPage() {
         <main id="settings-content" className="settings-content" tabIndex={-1}>
           <header className="settings-header">
             <h1>设置</h1>
-            <p>管理 Bok 已保存网页、Chrome 书签栏和本地备份。</p>
+            <p>管理机器名称、Bok 已保存网页和本地备份。</p>
           </header>
+
+          <section
+            id="machine-settings"
+            className="settings-section"
+            aria-labelledby="machine-heading"
+          >
+            <div className="settings-section__heading">
+              <h2 id="machine-heading">机器</h2>
+              <p>标识当前电脑。这个设置不会随备份迁移。</p>
+            </div>
+            <dl className="settings-list">
+              <div className="settings-row settings-row--device-name">
+                <dt>
+                  {isEditingBackupDeviceName ? (
+                    <label htmlFor="backup-device-name">机器名称</label>
+                  ) : (
+                    '机器名称'
+                  )}
+                </dt>
+                <dd>
+                  {isEditingBackupDeviceName ? (
+                    <form
+                      className="settings-device-name-form"
+                      noValidate
+                      onSubmit={(event) => void saveDeviceName(event)}
+                    >
+                      <div className="settings-device-name-controls">
+                        <input
+                          ref={deviceNameInputRef}
+                          id="backup-device-name"
+                          name="backupDeviceName"
+                          className="settings-input"
+                          type="text"
+                          value={backupDeviceName}
+                          maxLength={32}
+                          pattern="[a-z0-9_-]{1,32}"
+                          autoComplete="off"
+                          spellCheck={false}
+                          disabled={Boolean(busy)}
+                          aria-invalid={backupDeviceNameError ? true : undefined}
+                          aria-describedby={`backup-device-name-help${backupDeviceNameError ? ' backup-device-name-error' : ''}`}
+                          onChange={(event) => {
+                            setBackupDeviceName(event.currentTarget.value.toLowerCase());
+                            setBackupDeviceNameError('');
+                            setCanTakeOverBackupDeviceName(false);
+                          }}
+                        />
+                        <button
+                          type="submit"
+                          className="secondary-button"
+                          disabled={Boolean(busy)}
+                        >
+                          {busy === 'device-name' ? '保存中…' : '保存名称'}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={Boolean(busy)}
+                          onClick={cancelEditingBackupDeviceName}
+                        >
+                          取消
+                        </button>
+                        {canTakeOverBackupDeviceName && (
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={Boolean(busy)}
+                            onClick={() => void takeOverDeviceName()}
+                          >
+                            重新绑定此名称
+                          </button>
+                        )}
+                      </div>
+                      <p id="backup-device-name-help">
+                        使用 1–32 个小写字母、数字、- 或 _。备份目录可访问时会检查重名。
+                      </p>
+                      {backupDeviceNameError && (
+                        <p id="backup-device-name-error" className="settings-field-error">
+                          {backupDeviceNameError}
+                        </p>
+                      )}
+                    </form>
+                  ) : (
+                    <button
+                      ref={deviceNameEditButtonRef}
+                      type="button"
+                      className="settings-device-name-value"
+                      disabled={Boolean(busy)}
+                      aria-label={`修改机器名称，当前名称为 ${savedBackupDeviceName}`}
+                      onClick={startEditingBackupDeviceName}
+                    >
+                      <strong>{savedBackupDeviceName}</strong>
+                      <small>修改</small>
+                    </button>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </section>
 
           <section
             id="saved-pages-settings"
@@ -496,6 +811,9 @@ export default function SettingsPage() {
                   {state?.lastSavedPagesBackupFileName && (
                     <small>已保存网页：{state.lastSavedPagesBackupFileName}</small>
                   )}
+                  {state?.lastSettingsBackupFileName && (
+                    <small>本机设置：{state.lastSettingsBackupFileName}</small>
+                  )}
                   {state?.lastArchiveBackupFileName && (
                     <small>书签归档：{state.lastArchiveBackupFileName}</small>
                   )}
@@ -519,9 +837,17 @@ export default function SettingsPage() {
               <dt>最近每周备份</dt>
               <dd>
                 <div className="backup-time">
-                  <strong>{formatBackupTime(state?.lastWeeklyBackupAt ?? null)}</strong>
+                  <strong>
+                    本机：{formatBackupTime(state?.lastWeeklyBackupAt ?? null)}
+                  </strong>
                   {state?.lastWeeklyBackupFileName && (
-                    <small>历史包：{state.lastWeeklyBackupFileName}</small>
+                    <small>本机包：{state.lastWeeklyBackupFileName}</small>
+                  )}
+                  <strong className="backup-time__shared">
+                    共享：{formatBackupTime(state?.lastSharedWeeklyBackupAt ?? null)}
+                  </strong>
+                  {state?.lastSharedWeeklyBackupFileName && (
+                    <small>共享包：{state.lastSharedWeeklyBackupFileName}</small>
                   )}
                 </div>
               </dd>
@@ -533,10 +859,10 @@ export default function SettingsPage() {
                 <div>
                   <strong>每日最新备份，每周保留历史</strong>
                   <p>
-                    Chrome 书签、已保存网页和书签归档分别写入三个固定文件，每天覆盖。
-                    每周第一次成功备份时，三个文件还会打包为 ZIP，最多保留最近 10 份。
-                    只有写入和校验全部成功才算完成；失败后当天继续尝试。归档和恢复时
-                    还会立即更新归档文件。
+                    本机的已保存网页和设置、共享的 Chrome 书签和书签归档分别写入四份
+                    最新备份，每天覆盖。每周第一次成功备份时，本机和共享数据分别打包为
+                    ZIP，每台电脑每类最多保留最近 10 份。只有四份文件全部写入并校验成功才算完成；
+                    失败后当天继续尝试。归档和恢复时还会立即更新共享归档文件。
                   </p>
                 </div>
               </dd>

@@ -338,6 +338,8 @@ button { color: inherit; }
   line-height: 1.4;
 }
 
+.backup-time__shared { margin-top: 6px; }
+
 .settings-row--rule dd { align-items: flex-start; }
 
 .settings-select-control {
@@ -376,6 +378,97 @@ button { color: inherit; }
   font-size: 0.78125rem;
   line-height: 1.5;
 }
+
+.settings-row--device-name dd { align-items: flex-start; }
+
+.settings-device-name-value {
+  display: inline-flex;
+  min-width: 160px;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-device-name-value strong { font-size: 0.875rem; }
+
+.settings-device-name-value small {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.settings-device-name-value:not(:disabled):hover {
+  border-color: var(--border-strong);
+  background: var(--surface-muted);
+}
+
+.settings-device-name-value:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.settings-device-name-value:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.settings-device-name-form {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settings-device-name-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-input {
+  width: min(100%, 240px);
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.settings-input:hover:not(:disabled) { border-color: var(--accent); }
+
+.settings-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.settings-input[aria-invalid="true"] { border-color: var(--danger); }
+
+.settings-input:disabled { opacity: 0.55; }
+
+.settings-device-name-form p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78125rem;
+  line-height: 1.5;
+}
+
+.settings-device-name-form .settings-field-error { color: var(--danger); }
 
 .secondary-button {
   min-height: 36px;
@@ -520,6 +613,18 @@ button { color: inherit; }
   }
 
   .settings-select { width: 100%; }
+
+  .settings-device-name-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-input,
+  .settings-device-name-value,
+  .settings-device-name-controls .secondary-button {
+    width: 100%;
+    min-height: 44px;
+  }
 
   .settings-notice {
     right: 14px;

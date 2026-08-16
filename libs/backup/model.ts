@@ -4,14 +4,19 @@ import type { ImportSessionsResult } from '../saved-pages/persistence';
 export interface BookmarkBackupState {
   schemaVersion: 1;
   directoryName: string | null;
+  deviceName: string;
   lastSuccessfulBackupAt: number | null;
   lastSuccessfulBackupDay: string | null;
   lastBackupFileName: string | null;
   lastSavedPagesBackupFileName: string | null;
+  lastSettingsBackupFileName: string | null;
   lastArchiveBackupFileName: string | null;
   lastWeeklyBackupAt: number | null;
   lastSuccessfulWeeklyBackupWeek: string | null;
   lastWeeklyBackupFileName: string | null;
+  lastSharedWeeklyBackupAt: number | null;
+  lastSuccessfulSharedWeeklyBackupWeek: string | null;
+  lastSharedWeeklyBackupFileName: string | null;
   lastAttemptAt: number | null;
   lastError: string | null;
 }

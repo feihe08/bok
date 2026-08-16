@@ -99,9 +99,11 @@ Chrome 书签栏
 - 路径使用数组而不是 `"Dev/Tools"` 字符串，避免文件夹名称本身包含 `/` 时产生歧义。
 - Chrome 同步时，目录路径相对于书签栏根节点，不包含“书签栏”本身。
 
-## Session 与分组
+## Session、Chrome Group 与 Tab
 
-Bok 按一次保存操作记录一个 `SavedSession`，并用 `SavedGroup` 保留当时的分组关系：
+Bok 的持久化域模型只有 `SavedSession`、`SavedGroup` 和 `SavedTab`。每次保存
+当前窗口生成一个有序 `SavedSession`；`items` 严格保留 Chrome 标签栏顺序，
+独立标签直接保存为 tab item，Group 只表示真实 Chrome 标签组：
 
 ```ts
 export type SavedGroupColor =
@@ -122,7 +124,7 @@ export interface SavedGroup {
   title: string;
   createdAt: number;
   color?: SavedGroupColor;
-  grouped: boolean;
+  grouped: true;
   locked: boolean;
   pinned: boolean;
   restoredAt: number | null;
@@ -132,53 +134,72 @@ export interface SavedGroup {
   tabs: SavedTab[];
 }
 
+export type SavedSessionItem =
+  | { type: 'tab'; tab: SavedTab }
+  | { type: 'group'; group: SavedGroup };
+
 export interface SavedSession {
   id: string;
   createdAt: number;
-  groups: SavedGroup[];
+  title: string;
+  locked: boolean;
+  pinned: boolean;
+  restoredAt: number | null;
+  archivedAt: number | null;
+  taskStatus: 'todo' | 'doing' | 'done' | null;
+  taskCompletedAt: number | null;
+  items: SavedSessionItem[];
 }
 ```
+
+上面是当前公开模型和持久化结构。新存储不包含 `layout`、`legacyGroups`
+或为独立标签派生的运行期 groups proxy。
 
 层级关系为：
 
 ```text
 SavedSession
-└── SavedGroup[]
-    └── SavedTab[]
+└── SavedSessionItem[]
+    ├── tab -> SavedTab
+    └── group -> SavedGroup -> SavedTab[]
+
 ```
 
-`SavedGroup` 是通用容器，不等同于书签目录。本文严格区分以下两个概念：
+`SavedGroup` 不等同于书签目录，也不是通用容器。本文严格区分以下概念：
 
-- **分组**：`grouped: false`。点击 Bok 图标时，当前窗口中不属于 Chrome 标签组的
-  标签会形成普通分组。普通分组名称允许为空和重复，不参与浏览器运行期同步。
-- **标签组**：`grouped: true`。它对应 Chrome 原生标签组，名称必须非空且在所有 Bok
-  记录的标签组中唯一。标签组始终按 Chrome 标签组打开，打开后参与运行期同步；同步
-  资格只取决于 `grouped`，不依赖任务状态。
+- **独立标签**：新保存记录中直接使用 `type: 'tab'`，不再为了展示而合并成普通分组。
+- **标签组**：`grouped` 固定为 `true`。它对应 Chrome 原生标签组，保留名称和
+  `color`；名称必须非空且在所有 Bok 记录的标签组中唯一。标签组始终
+  按 Chrome 标签组打开，打开后参与运行期同步；同步资格不依赖任务状态。
 
-普通分组可以转换为标签组，标签组不能转回普通分组。转换只改变 Bok 记录，不会立即
-打开浏览器标签；选择“以标签组打开”则先转换再打开。转换、以标签组打开或首次标记
-为任务时，如果名称与已有标签组重复，使用“原名称 `YYYY/M/D HH:mm`”；若同一分钟仍
-冲突，再追加数字。直接重命名标签组遇到重复名时拒绝保存。保存新的 Chrome 标签组
+直接重命名标签组遇到重复名时拒绝保存。保存新的 Chrome 标签组
 遇到名称冲突且不能按恢复规则认定为同一组时，依次使用“原名称 1”、“原名称 2”。
 后台启动时会先用历史名称恢复运行期映射，再按创建时间从早到晚整理已有重名标签组：
 较早的标签组保留原名，后续同名组使用数字后缀；已绑定的 Chrome 标签组同步改名。
-普通分组不参与这项整理。
 
 每个 `SavedTab` 仍然拥有自己的唯一目录。`color` 只允许 Chrome 支持的九种标签组
-颜色。`locked: true` 表示该组可以重复打开，但不能删除整组或其中的单个标签，也不能
-执行组内去重；锁定不影响重命名、归档、固定或任务标记。`pinned: true` 表示当前视图
-置顶，并且自动归档跳过该组。`restoredAt` 记录最近一次手动恢复时间；自动归档会从
-`createdAt` 与 `restoredAt` 中较晚的时间重新计算所选周期。`archivedAt` 仍是归档
-状态的唯一来源。
+颜色。Session 和 Group 都拥有 `locked`、`pinned`、`restoredAt`、`archivedAt`、
+`taskStatus` 和 `taskCompletedAt`；Session 另有可编辑的 `title`。空标题在界面上
+回退为“X 个标签”。Session 的固定、归档、任务和锁定只修改 Session 本身，
+不批量改写子 Group。
 
-`taskStatus: null` 表示未标记为任务；用户主动将标签页或分组标记为任务时，第一次状态
+`locked: true` 不影响重命名、归档、固定、任务标记或打开。Session 锁定时
+不能删除整个 Session 或其独立标签；任一子 Group 锁定时也不允许删除整个
+Session。Group 锁定时不能删除该组或组内标签，也不能组内去重。`pinned: true`
+表示固定并让自动归档跳过该对象；Session 内仍保持原始 item 顺序，不因固定或
+筛选重排。`restoredAt` 记录最近一次手动恢复时间；自动归档会从 `createdAt`
+与 `restoredAt` 中较晚的时间重新计算所选周期。`archivedAt` 是对应对象
+归档状态的唯一来源。
+
+`taskStatus: null` 表示未标记为任务；用户主动将 Session、标签页或 Group 标记为任务时，第一次状态
 固定为 `doing`，之后可以切换为 `todo`、`doing` 或 `done`。进入 `done` 时写入
-`taskCompletedAt`，离开 `done` 或取消任务时清空。普通分组首次被标记为任务时还会按
-上述唯一命名规则转换为标签组，但不会自动打开浏览器标签。取消任务不会把 `grouped`
-改回 `false`。新保存的组默认 `locked: false`、`pinned: false`、
-`restoredAt: null`、`archivedAt: null`、`taskStatus: null`、
-`taskCompletedAt: null`；来自 Chrome 标签组的记录使用
-`grouped: true`，独立标签形成的普通分组使用 `grouped: false`。
+`taskCompletedAt`，离开 `done` 或取消任务时清空。新保存的 Session 和 Group
+默认 `locked: false`、`pinned: false`、`restoredAt: null`、`archivedAt: null`、
+`taskStatus: null`、`taskCompletedAt: null`。独立标签不会生成 Group，其 Session
+提供整体状态和操作。
+
+只包含一个真实 Chrome Group 的 Session 可以在界面上视觉合并为一层，但这不会
+改变数据层级：Session 仍包含一个 group item，Session 命令和 Group 命令仍分别作用。
 
 
 ## 单条 Session 示例
@@ -187,34 +208,59 @@ SavedSession
 {
   "id": "session-id",
   "createdAt": 1784563200000,
-  "groups": [
+  "title": "",
+  "locked": false,
+  "pinned": false,
+  "restoredAt": null,
+  "archivedAt": null,
+  "taskStatus": null,
+  "taskCompletedAt": null,
+  "items": [
     {
-      "id": "group-id",
-      "title": "Bok",
-      "createdAt": 1784563200000,
-      "color": "blue",
-      "grouped": true,
-      "locked": false,
-      "pinned": false,
-      "restoredAt": null,
-      "archivedAt": null,
-      "taskStatus": "doing",
-      "taskCompletedAt": null,
-      "tabs": [
-        {
-          "id": "bookmark-id",
-          "url": "https://developer.chrome.com/docs/extensions/reference/api/bookmarks",
-          "title": "Chrome Bookmarks API",
-          "favIconUrl": "https://developer.chrome.com/favicon.ico",
-          "createdAt": 1784563200000,
-          "updatedAt": 1784563200000,
-          "tags": ["Chrome", "Extension"],
-          "directory": ["Dev", "Tutorials"],
-          "taskStatus": null,
-          "taskCompletedAt": null,
-          "archivedAt": null
-        }
-      ]
+      "type": "tab",
+      "tab": {
+        "id": "standalone-tab-id",
+        "url": "https://example.com",
+        "title": "Example",
+        "createdAt": 1784563200000,
+        "updatedAt": 1784563200000,
+        "tags": [],
+        "directory": null,
+        "taskStatus": null,
+        "taskCompletedAt": null,
+        "archivedAt": null
+      }
+    },
+    {
+      "type": "group",
+      "group": {
+        "id": "group-id",
+        "title": "Bok",
+        "createdAt": 1784563200000,
+        "color": "blue",
+        "grouped": true,
+        "locked": false,
+        "pinned": false,
+        "restoredAt": null,
+        "archivedAt": null,
+        "taskStatus": "doing",
+        "taskCompletedAt": null,
+        "tabs": [
+          {
+            "id": "bookmark-id",
+            "url": "https://developer.chrome.com/docs/extensions/reference/api/bookmarks",
+            "title": "Chrome Bookmarks API",
+            "favIconUrl": "https://developer.chrome.com/favicon.ico",
+            "createdAt": 1784563200000,
+            "updatedAt": 1784563200000,
+            "tags": ["Chrome", "Extension"],
+            "directory": ["Dev", "Tutorials"],
+            "taskStatus": null,
+            "taskCompletedAt": null,
+            "archivedAt": null
+          }
+        ]
+      }
     }
   ]
 }
@@ -222,12 +268,12 @@ SavedSession
 
 ## 存储、校验与旧数据兼容
 
-数据保存在 `browser.storage.local` 的 `sessions` key 中。当前存储版本为 v1，
+数据保存在 `browser.storage.local` 的 `sessions` key 中。当前存储版本为 v3，
 顶层使用带版本号的 envelope，而不是直接保存数组：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 3,
   "revision": 3,
   "sessions": []
 }
@@ -235,17 +281,29 @@ SavedSession
 
 - `schemaVersion` 用来决定当前代码是否能够安全读取数据。
 - `revision` 每次完整写入时递增，用于辨识数据快照。
-- `sessions` 保存完整的 `SavedSession[]`。
+- `sessions` 保存完整的 v3 `SavedSession[]`；不会写入 `legacyGroups`。
 
 自动归档周期独立保存在 primitive key `savedPagesAutoArchivePeriod` 中，可选值为
 `1`、`3`、`7`、`30` 或 `"never"`。缺失或非法值回退为默认的 `7` 天；`30` 按
 30 × 24 小时计算，`"never"` 表示永不自动归档。
 
-旧版直接存储的 `SavedSession[]` 被视为 v0，仍可正常读取；第一次新增、修改或
-删除记录时会写成 v1。若检测到高于当前支持范围的版本，Bok 会停止读取和写入，
-避免旧版本扩展覆盖较新的数据。
+旧版直接存储的 `SavedSession[]` 被视为 v0，v1/v2 envelope 也可正常读取。迁移时：
 
-读取 v1 时会校验 session、group 和 tab 的完整结构、字段类型及 ID 唯一性。某条
+- v0/v1/v2 中每个 `grouped: false` 的旧普通分组都拆成一个仅含 direct tab items
+  的独立 Session，保留该组的标题、创建时间、标签顺序和状态。
+- 原 Session 中存在 direct tab 或 `grouped: true` 的真实 Chrome Group 时，它们仍按原顺序
+  保留在原 Session；只把旧普通分组分别拆出。
+- 真实 Chrome Group 写为 group item，`grouped` 固定为 `true`；迁移结果不保留
+  `layout`、`legacyGroups` 或运行期 groups proxy。
+
+第一次写成 v3 前，Bok 会把完整原始值保存到 `sessionsPreV3Snapshot`，
+已有快照不会被覆盖。旧版本
+扩展遇到 v3 时会停止读取和写入，避免覆盖较新的数据；重新升级到支持 v3 的版本后可继续使用。
+
+Saved pages 存储属于当前机器。不同机器可以分别保留 v1、v2 或 v3 备份；升级和首次写入
+互不影响。导入另一台机器的数据时，v1/v2 会先迁移到 v3，再按 session 合并，不会替换本机全部记录。
+
+读取 v0/v1/v2/v3 时会校验 session、item、group 和 tab 的完整结构、字段类型及 ID 唯一性。某条
 session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原始数据、问题位置和
 发现时间会追加保存到 `browser.storage.local` 的 `sessionsRecovery` key，且同一份
 损坏数据不会重复写入。顶层结构损坏时无法安全拆分记录，因此会先保留整个原始值，
@@ -258,9 +316,9 @@ session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原
 - 缺失、空字符串或 `null` 目录转换为 `null`
 - 缺失或非法标签转换为空数组
 - 标签会去空、去重
-- 缺失或非 `true` 的 `locked` 转换为 `false`
-- 缺失或非 `true` 的 `pinned` 转换为 `false`
-- 缺失的 `restoredAt` 转换为 `null`；v1 中除 `null` 或有限数字以外的值会按损坏记录隔离
+- Session 或组缺失、非 `true` 的 `locked` 和 `pinned` 转换为 `false`
+- Session 或组缺失的 `restoredAt` 和 `archivedAt` 转换为 `null`；需要严格
+  校验的字段遇到非 `null` 且非有限数字时按损坏记录隔离
 - 缺失或非法的组/标签页 `createdAt` 使用所属 session 或标签组的创建时间
 - 缺失或非法的组/标签页 `archivedAt` 转换为 `null`
 - 合法的 `taskStatus`（`todo`、`doing`、`done`）原样保留
@@ -270,35 +328,28 @@ session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原
   `status: "completed"` 转换为 `taskStatus: "done"`
 - 旧 `status: "not-started"`、缺失状态或非法状态转换为 `taskStatus: null`，
   因为旧的“未开始”是默认值，不代表用户主动标记为任务
-- 原有任务分组继续规范化为 `grouped: true`，以兼容任务分组按 Chrome 标签组打开的
-  既有行为
 - 后台启动时在恢复运行期映射后整理历史标签组名称，补齐空名称并按数字后缀消除重名；
-  普通分组名称保持不变
 - 非 Chrome 支持值的 `color` 转换为 `undefined`
 
-兼容转换只发生在内存中。下一次新增、修改或删除记录时，规范化后的有效数据会随
-v1 envelope 重新写入存储。
+兼容转换发生在读取时。下一次新增、修改或删除记录时，规范化后的有效数据会随
+schema v3 envelope 重新写入存储，并先按上述规则保留 `sessionsPreV3Snapshot`。
 
 ## 保存页操作与生命周期
 
-保存页通过后台消息执行标签页删除和任务状态，以及分组转换、删除、重命名、锁定、
-固定、归档/恢复、任务状态、组内去重和打开操作。
+保存页通过后台消息执行 Session 的打开全部、删除、重命名、固定、归档/恢复、
+任务状态和锁定，以及 Chrome Group 和 Tab 已有的对应操作。
 消息传输只负责校验、
 排队和统一响应，具体命令由独立的操作执行器分发。所有保存和修改操作按顺序执行：
 
-- 打开命令明确携带单一列表中目标组的完整 `tabIds`，并按原保存顺序创建；搜索
-  只过滤渲染结果，不缩小打开范围。
-- 目的地可以是保存页所在窗口或新窗口。新窗口通过 Chrome Windows API 创建。
-- 普通打开不创建标签组，也不改变普通分组。普通分组选择“以标签组打开”时先永久转换
-  为标签组；名称冲突按时间规则改名。标签组打开会恢复唯一名称和颜色，无显式名称时
-  使用“`N` 个标签页”，无有效颜色时使用 `grey`。
-- 普通分组的更多操作菜单提供“转换为标签组”；转换后不提供反向操作。标签组直接
-  重命名时会检查全局标签组名称，重复名会返回错误。
-- 创建完成后激活第一条标签页。
-- 点击单个标签或普通打开只创建浏览器标签，不改写保存数据。打开 `grouped: true` 的
-  标签组时，如果发现满足恢复条件的现有 Chrome 标签组，会先执行无损并集合并。只有
-  明确执行删除或组内去重时才会主动移除 Bok 数据。
-- `grouped: true` 的标签组始终以 Chrome 标签组形式打开。打开成功后，后台在当前
+- `open-session` 始终读取完整持久化 Session，不受搜索或当前渲染筛选影响。
+  direct tab 和多个 Chrome Group 按 `items` 顺序还原；标签组保留名称和颜色。
+- 目的地可以是保存页所在窗口或新窗口。打开到当前窗口时，整个 Session
+  作为连续块追加；新窗口会复用创建窗口产生的首个 tab，不重复打开首条记录。
+  创建完成后激活第一条标签页。
+- 仅含一个 Chrome Group 的 Session 若已有活跃绑定，打开 Session 会聚焦已有组。
+  包含多个 item 的 Session 若任一子 Group 已有活跃绑定，则在创建任何新 tab
+  之前拒绝整次打开，避免部分重复。
+- Chrome Group 打开后，后台在当前
   浏览器会话中绑定 Chrome 标签组与原 Bok 标签组；再次打开已有活跃绑定时聚焦原组，
   不创建副本。任务状态不参与同步资格判断，取消任务后绑定继续生效。
 - 活跃同步组中加入或移出的单个标签会同步新增或删除原 Bok 分组记录；单个标签
@@ -317,9 +368,10 @@ v1 envelope 重新写入存储。
   后缀保证名称唯一。同一次保存中的多个 Chrome 标签组也共用这套名称占用检查。
 - 活跃 Chrome 标签组被改成其他标签组已使用的名称时，Bok 使用时间后缀改成唯一名称，
   并把最终名称同步回 Chrome。
-- 任一步骤失败时停止后续操作，不回滚已经打开的标签页，并保留 Bok 记录。
-  错误会包含已打开数量。空选择不能打开，也会保留。
-- 存储层会在删除标签或整组前重新读取记录；锁定组的删除请求会明确失败。
+- Session 打开过程中的任一创建或绑定步骤失败时，Bok 记录保持不变；尽量删除
+  本次创建的 tabs 或新窗口，回滚也失败时明确报错。
+- 删除 Session 会精确清理其所有运行期同步绑定，但不关闭已打开的 Chrome tabs。
+  Session 已锁定或包含任一已锁定 Group 时拒绝删除。
 
 同步标签组的 Chrome `tabId` 和 `tabGroupId` 只在当前浏览器会话有效，运行期绑定
 保存在 `browser.storage.session`。浏览器完整重启或映射丢失后，按以下规则恢复：
@@ -339,18 +391,21 @@ v1 envelope 重新写入存储。
 ## 保存网页的归档与组内去重
 
 - 归档与恢复不会删除数据，也不改写标签页的兼容归档字段。
-- `group.archivedAt === null` 表示当前组，非空表示已归档组。保存页默认展示当前组，
-  归档视图展示已归档组并提供恢复操作。
-- 手动归档不检查年龄、任务状态或固定状态。固定组手动归档时，同一次写入先设置
-  `pinned: false`，再写入 `archivedAt`。恢复会清空 `archivedAt` 并把当前时间写入
+- Session 和 Group 各自以自身的 `archivedAt` 作为归档状态唯一来源。保存页
+  默认展示当前视图，归档视图展示已归档对象并提供恢复操作。
+- 手动归档不检查年龄、任务状态或固定状态。固定 Session 或 Group
+  手动归档时，同一次写入先设置 `pinned: false`，再写入 `archivedAt`。
+  恢复会清空 `archivedAt` 并把当前时间写入
   `restoredAt`，不会修改 `createdAt` 或重新固定；再次手动归档保留 `restoredAt`。
 - 自动归档由 Chrome alarms 每小时触发，并在后台启动时补充执行。周期可设为 1、3、
-  7、30 天或永不，默认 7 天。只有距 `max(createdAt, restoredAt ?? createdAt)` 严格
-  超过所选周期、组和所有标签页均不处于 `todo` 或 `doing`、`pinned: false` 且尚未
-  归档的组才符合条件；`done` 和未标记任务的组可以自动归档。设备休眠期间不会主动
+  7、30 天或永不，默认 7 天。自动归档处理仅含 direct tab items 的 Session，
+  以及每个真实 Chrome Group；混合 Session 的 Group 各自判定，不自动归档整个
+  混合 Session。只有距 `max(createdAt, restoredAt ?? createdAt)` 严格超过所选周期、
+  对象和所有相关标签均不处于 `todo` 或 `doing`、`pinned: false` 且尚未归档
+  时才符合条件；`done` 和未标记任务的对象可以自动归档。设备休眠期间不会主动
   唤醒，恢复运行后再检查。修改设置后会立即按新周期执行一次检查，但不会改变已经
   归档的组。
-- 固定组在当前视图置顶；固定与锁定是两个独立状态。
+- 固定对象跳过自动归档，但不改变 Session 内顺序；固定与锁定是两个独立状态。
 - 组内去重只检查目标组。比较键为 `new URL(url).href` 的完整规范 URL，查询
   参数和 hash 都参与比较；历史坏 URL 回退为去除首尾空格的原字符串。
 - 重复时保留组内第一条记录，返回移除数量。锁定组拒绝去重。

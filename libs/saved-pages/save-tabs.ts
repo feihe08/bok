@@ -7,18 +7,18 @@ import {
 } from './group-names';
 import { getSessions } from './persistence';
 import { addSession } from './store';
+import { createItemsSession } from './session-items';
 import {
   finishTaskGroupsSave,
   prepareTaskGroupsForSave,
 } from '../tab-group-sync/sync';
-import type { SavedGroup, SavedSession, SavedTab } from './model';
+import type { SavedGroup, SavedSessionItem, SavedTab } from './model';
 
 type Tab = Browser.tabs.Tab;
 type CapturableTab = Tab & { id: number; url: string };
 
 /** Chrome's sentinel for "tab does not belong to a group". */
 const TAB_GROUP_ID_NONE = -1;
-const UNGROUPED = '';
 
 export interface SaveResult {
   savedTabs: number;
@@ -135,17 +135,14 @@ async function saveAndCloseSelection(
   if (capturable.length > 0) {
     const createdAt = Date.now();
     const groupedTitles = collectGroupedTitles(await getSessions());
-    groups = await buildGroups(
+    const items = await buildItems(
       capturable,
       windowId,
       createdAt,
       groupedTitles,
     );
-    const session: SavedSession = {
-      id: crypto.randomUUID(),
-      createdAt,
-      groups,
-    };
+    groups = items.flatMap((item) => (item.type === 'group' ? [item.group] : []));
+    const session = createItemsSession(crypto.randomUUID(), createdAt, items);
     await addSession(session);
   }
 
@@ -205,51 +202,68 @@ function toCapturableTab(
   return { ...tab, id: tab.id, url };
 }
 
-/** Partition tabs by their Chrome tab group, preserving tab order. */
-async function buildGroups(
+/** Preserve Chrome tab-strip order, grouping only contiguous Chrome-group tabs. */
+async function buildItems(
   tabs: CapturableTab[],
   windowId: number,
   createdAt: number,
   groupedTitles: Set<string>,
-): Promise<SavedGroup[]> {
+): Promise<SavedSessionItem[]> {
   const chromeGroups = await browser.tabGroups.query({ windowId });
+  return buildSavedSessionItems(tabs, chromeGroups, createdAt, groupedTitles);
+}
+
+/** Map the current tab strip to ordered v3 session items. */
+export function buildSavedSessionItems(
+  tabs: CapturableTab[],
+  chromeGroups: Browser.tabGroups.TabGroup[],
+  createdAt: number,
+  groupedTitles: Set<string>,
+): SavedSessionItem[] {
   const metaById = new Map(chromeGroups.map((g) => [g.id, g]));
+  const orderedTabs = [...tabs].sort((left, right) =>
+    (left.index ?? 0) - (right.index ?? 0),
+  );
 
-  // Keyed by groupId so ungrouped tabs collapse into a single bucket.
-  const buckets = new Map<number, CapturableTab[]>();
-  for (const tab of tabs) {
-    const key = tab.groupId ?? TAB_GROUP_ID_NONE;
-    const bucket = buckets.get(key) ?? [];
-    bucket.push(tab);
-    buckets.set(key, bucket);
-  }
-
-  const groups: SavedGroup[] = [];
-  for (const [groupId, groupTabs] of buckets) {
+  const items: SavedSessionItem[] = [];
+  for (let index = 0; index < orderedTabs.length; ) {
+    const tab = orderedTabs[index]!;
+    const groupId = tab.groupId ?? TAB_GROUP_ID_NONE;
+    if (groupId === TAB_GROUP_ID_NONE) {
+      items.push({ type: 'tab', tab: toSavedTab(tab, createdAt) });
+      index += 1;
+      continue;
+    }
+    const groupTabs: CapturableTab[] = [];
+    while (
+      index < orderedTabs.length &&
+      (orderedTabs[index]!.groupId ?? TAB_GROUP_ID_NONE) === groupId
+    ) {
+      groupTabs.push(orderedTabs[index]!);
+      index += 1;
+    }
     const meta = metaById.get(groupId);
-    const grouped = groupId !== TAB_GROUP_ID_NONE;
     const requestedTitle =
       normalizeGroupTitle(meta?.title ?? '') || getDefaultGroupTitle(groupTabs.length);
-    groups.push({
-      id: crypto.randomUUID(),
-      title: grouped
-        ? reserveNumericGroupTitle(requestedTitle, groupedTitles)
-        : UNGROUPED,
-      createdAt,
-      color: meta?.color,
-      grouped,
-      locked: false,
-      pinned: false,
-      restoredAt: null,
-      archivedAt: null,
-      taskStatus: null,
-      taskCompletedAt: null,
-      tabs: groupTabs.map((tab) => toSavedTab(tab, createdAt)),
+    items.push({
+      type: 'group',
+      group: {
+        id: crypto.randomUUID(),
+        title: reserveNumericGroupTitle(requestedTitle, groupedTitles),
+        createdAt,
+        color: meta?.color,
+        grouped: true,
+        locked: false,
+        pinned: false,
+        restoredAt: null,
+        archivedAt: null,
+        taskStatus: null,
+        taskCompletedAt: null,
+        tabs: groupTabs.map((item) => toSavedTab(item, createdAt)),
+      },
     });
   }
-
-  // Real groups first; the ungrouped bucket sinks to the bottom.
-  return groups.sort((a, b) => Number(b.grouped) - Number(a.grouped));
+  return items;
 }
 
 function toSavedTab(tab: CapturableTab, now: number): SavedTab {

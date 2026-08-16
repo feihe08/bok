@@ -28,6 +28,7 @@ import type {
   BookmarkArchiveStore,
   BookmarkNode,
 } from '../../libs/bookmarks/model';
+import { THEME_PREFERENCE_KEY } from '../../libs/saved-pages/settings';
 import { ActionMenu, type ActionMenuEntry } from '../shared/ActionMenu';
 import { ArchiveView } from './ArchiveView';
 
@@ -494,6 +495,43 @@ export default function BookmarkManagerPage() {
   }, [loadBookmarks]);
 
   useEffect(() => {
+    let cancelled = false;
+    const legacyTheme = getStoredTheme();
+
+    void browser.storage.local
+      .get(THEME_PREFERENCE_KEY)
+      .then((stored) => {
+        if (legacyTheme) {
+          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
+          return browser.storage.local
+            .set({ [THEME_PREFERENCE_KEY]: legacyTheme })
+            .then(() =>
+              browser.runtime.sendMessage({
+                type: 'bok/bookmark-backup',
+                force: true,
+              }),
+            );
+        }
+
+        const preference = stored[THEME_PREFERENCE_KEY];
+        if (
+          cancelled ||
+          (preference !== 'light' && preference !== 'dark')
+        ) {
+          return;
+        }
+        localStorage.setItem(THEME_STORAGE_KEY, preference);
+        document.documentElement.dataset.theme = preference;
+        setTheme(preference);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const onChange = (event: MediaQueryListEvent) => {
       setSystemTheme(event.matches ? 'dark' : 'light');
@@ -588,6 +626,15 @@ export default function BookmarkManagerPage() {
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     setTheme(nextTheme);
+    void browser.storage.local
+      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
+      .then(() =>
+        browser.runtime.sendMessage({
+          type: 'bok/bookmark-backup',
+          force: true,
+        }),
+      )
+      .catch(() => undefined);
   }
 
   function selectFolder(id: string, focusContent = true) {

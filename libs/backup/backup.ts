@@ -1,6 +1,10 @@
 import { browser } from 'wxt/browser';
 import JSZip from 'jszip';
 import { exportSessionsJson } from '../saved-pages/persistence';
+import {
+  getSavedPagesAutoArchivePeriod,
+  getThemePreference,
+} from '../saved-pages/settings';
 import { readBookmarksBar } from '../bookmarks/api';
 import {
   exportBookmarkArchiveJson,
@@ -14,17 +18,26 @@ import type {
 } from './model';
 
 export const BOOKMARK_BACKUP_STATE_KEY = 'bookmarkBackupState';
+export const BACKUP_DEVICE_NAME_KEY = 'backupDeviceName';
+export const BACKUP_DEVICE_CLAIM_ID_KEY = 'backupDeviceClaimId';
 
+const DEFAULT_BACKUP_DEVICE_NAME = 'personal';
+const BACKUP_DEVICE_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
 const BACKUP_DATABASE_NAME = 'bok-bookmark-backup';
 const BACKUP_DATABASE_VERSION = 1;
 const BACKUP_HANDLE_STORE = 'handles';
 const BACKUP_DIRECTORY_KEY = 'directory';
+const DEVICES_DIRECTORY_NAME = 'devices';
+const SHARED_DIRECTORY_NAME = 'shared';
+const HISTORY_DIRECTORY_NAME = 'history';
+const DEVICE_CLAIM_FILE_NAME = 'device.json';
 const BOOKMARKS_BACKUP_FILE_NAME = 'bok-bookmarks.json';
 const SAVED_PAGES_BACKUP_FILE_NAME = 'bok-saved-pages.json';
+const SETTINGS_BACKUP_FILE_NAME = 'bok-settings.json';
 export const BOOKMARK_ARCHIVE_BACKUP_FILE_NAME = 'bok-bookmark-archive.json';
-const WEEKLY_BACKUP_PREFIX = 'bok-weekly-backup-';
+const DEVICE_WEEKLY_BACKUP_PREFIX = 'bok-device-weekly-backup-';
+const SHARED_WEEKLY_BACKUP_PREFIX = 'bok-shared-weekly-backup-';
 const WEEKLY_BACKUP_LIMIT = 10;
-const WEEKLY_BACKUP_PATTERN = /^bok-weekly-backup-\d{4}-\d{2}-\d{2}\.zip$/;
 
 type BackupPermissionState = 'granted' | 'denied' | 'prompt';
 type BackupDirectoryHandle = FileSystemDirectoryHandle & {
@@ -41,6 +54,26 @@ type DirectoryPickerWindow = Window & {
     startIn?: FileSystemDirectoryHandle;
   }) => Promise<FileSystemDirectoryHandle>;
 };
+
+interface BackupDeviceIdentity {
+  deviceName: string;
+  claimId: string;
+}
+
+interface BackupDeviceClaimFile {
+  schemaVersion: 1;
+  kind: 'bok-backup-device-claim';
+  deviceName: string;
+  claimId: string;
+  claimedAt: string;
+}
+
+interface ClaimedBackupDirectories extends BackupDeviceIdentity {
+  root: BackupDirectoryHandle;
+  device: BackupDirectoryHandle;
+  shared: BackupDirectoryHandle;
+  generation: string;
+}
 
 interface BookmarkBackupNode {
   title: string;
@@ -63,22 +96,49 @@ interface BookmarkBackupFile {
   bookmarksBar: BookmarkBackupNode;
 }
 
+interface SettingsBackupFile {
+  schemaVersion: 1;
+  kind: 'bok-settings-backup';
+  createdAt: string;
+  settings: {
+    savedPagesAutoArchivePeriod: Awaited<
+      ReturnType<typeof getSavedPagesAutoArchivePeriod>
+    >;
+    theme: Awaited<ReturnType<typeof getThemePreference>>;
+  };
+}
+
+export class BackupDeviceNameConflictError extends Error {
+  readonly code = 'backup-device-name-conflict';
+
+  constructor(deviceName: string) {
+    super(`机器名称“${deviceName}”已被其他电脑使用，请换一个名称或明确接管`);
+    this.name = 'BackupDeviceNameConflictError';
+  }
+}
+
 const EMPTY_BACKUP_STATE: BookmarkBackupState = {
   schemaVersion: 1,
   directoryName: null,
+  deviceName: DEFAULT_BACKUP_DEVICE_NAME,
   lastSuccessfulBackupAt: null,
   lastSuccessfulBackupDay: null,
   lastBackupFileName: null,
   lastSavedPagesBackupFileName: null,
+  lastSettingsBackupFileName: null,
   lastArchiveBackupFileName: null,
   lastWeeklyBackupAt: null,
   lastSuccessfulWeeklyBackupWeek: null,
   lastWeeklyBackupFileName: null,
+  lastSharedWeeklyBackupAt: null,
+  lastSuccessfulSharedWeeklyBackupWeek: null,
+  lastSharedWeeklyBackupFileName: null,
   lastAttemptAt: null,
   lastError: null,
 };
 
 let backupInFlight: Promise<BookmarkBackupResult> | null = null;
+let forcedBackupQueued: Promise<BookmarkBackupResult> | null = null;
 let cachedDirectoryHandle: BackupDirectoryHandle | null | undefined;
 let archiveBackupWriteQueue = Promise.resolve();
 
@@ -90,8 +150,29 @@ function isNullableNumber(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value));
 }
 
-function normalizeBackupState(value: unknown): BookmarkBackupState {
-  if (typeof value !== 'object' || value === null) return EMPTY_BACKUP_STATE;
+function normalizeBackupDeviceName(value: unknown): string {
+  if (typeof value !== 'string') return DEFAULT_BACKUP_DEVICE_NAME;
+  const normalized = value.trim().toLowerCase();
+  return BACKUP_DEVICE_NAME_PATTERN.test(normalized)
+    ? normalized
+    : DEFAULT_BACKUP_DEVICE_NAME;
+}
+
+function validateBackupDeviceName(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!BACKUP_DEVICE_NAME_PATTERN.test(normalized)) {
+    throw new Error('机器名称只能包含小写字母、数字、- 和 _，长度为 1–32 个字符');
+  }
+  return normalized;
+}
+
+function normalizeBackupState(
+  value: unknown,
+  currentDeviceName = DEFAULT_BACKUP_DEVICE_NAME,
+): BookmarkBackupState {
+  if (typeof value !== 'object' || value === null) {
+    return { ...EMPTY_BACKUP_STATE, deviceName: currentDeviceName };
+  }
   const state = value as Record<string, unknown>;
   if (
     state.schemaVersion !== 1 ||
@@ -101,6 +182,8 @@ function normalizeBackupState(value: unknown): BookmarkBackupState {
     !isNullableString(state.lastBackupFileName) ||
     !(state.lastSavedPagesBackupFileName === undefined ||
       isNullableString(state.lastSavedPagesBackupFileName)) ||
+    !(state.lastSettingsBackupFileName === undefined ||
+      isNullableString(state.lastSettingsBackupFileName)) ||
     !(state.lastArchiveBackupFileName === undefined ||
       isNullableString(state.lastArchiveBackupFileName)) ||
     !(state.lastWeeklyBackupAt === undefined ||
@@ -109,19 +192,31 @@ function normalizeBackupState(value: unknown): BookmarkBackupState {
       isNullableString(state.lastSuccessfulWeeklyBackupWeek)) ||
     !(state.lastWeeklyBackupFileName === undefined ||
       isNullableString(state.lastWeeklyBackupFileName)) ||
+    !(state.lastSharedWeeklyBackupAt === undefined ||
+      isNullableNumber(state.lastSharedWeeklyBackupAt)) ||
+    !(state.lastSuccessfulSharedWeeklyBackupWeek === undefined ||
+      isNullableString(state.lastSuccessfulSharedWeeklyBackupWeek)) ||
+    !(state.lastSharedWeeklyBackupFileName === undefined ||
+      isNullableString(state.lastSharedWeeklyBackupFileName)) ||
     !isNullableNumber(state.lastAttemptAt) ||
     !isNullableString(state.lastError)
   ) {
-    return EMPTY_BACKUP_STATE;
+    return { ...EMPTY_BACKUP_STATE, deviceName: currentDeviceName };
   }
   return {
     schemaVersion: 1,
     directoryName: state.directoryName as string | null,
+    deviceName:
+      typeof state.deviceName === 'string'
+        ? normalizeBackupDeviceName(state.deviceName)
+        : currentDeviceName,
     lastSuccessfulBackupAt: state.lastSuccessfulBackupAt as number | null,
     lastSuccessfulBackupDay: state.lastSuccessfulBackupDay as string | null,
     lastBackupFileName: state.lastBackupFileName as string | null,
     lastSavedPagesBackupFileName:
       (state.lastSavedPagesBackupFileName as string | null | undefined) ?? null,
+    lastSettingsBackupFileName:
+      (state.lastSettingsBackupFileName as string | null | undefined) ?? null,
     lastArchiveBackupFileName:
       (state.lastArchiveBackupFileName as string | null | undefined) ?? null,
     lastWeeklyBackupAt:
@@ -130,6 +225,13 @@ function normalizeBackupState(value: unknown): BookmarkBackupState {
       (state.lastSuccessfulWeeklyBackupWeek as string | null | undefined) ?? null,
     lastWeeklyBackupFileName:
       (state.lastWeeklyBackupFileName as string | null | undefined) ?? null,
+    lastSharedWeeklyBackupAt:
+      (state.lastSharedWeeklyBackupAt as number | null | undefined) ?? null,
+    lastSuccessfulSharedWeeklyBackupWeek:
+      (state.lastSuccessfulSharedWeeklyBackupWeek as string | null | undefined) ??
+      null,
+    lastSharedWeeklyBackupFileName:
+      (state.lastSharedWeeklyBackupFileName as string | null | undefined) ?? null,
     lastAttemptAt: state.lastAttemptAt as number | null,
     lastError: state.lastError as string | null,
   };
@@ -197,6 +299,194 @@ async function writeBackupState(state: BookmarkBackupState): Promise<void> {
   await browser.storage.local.set({ [BOOKMARK_BACKUP_STATE_KEY]: state });
 }
 
+async function readStoredDeviceIdentity(): Promise<{
+  deviceName: string;
+  claimId: string | null;
+}> {
+  const stored = await browser.storage.local.get([
+    BACKUP_DEVICE_NAME_KEY,
+    BACKUP_DEVICE_CLAIM_ID_KEY,
+  ]);
+  const claimId = stored[BACKUP_DEVICE_CLAIM_ID_KEY];
+  return {
+    deviceName: normalizeBackupDeviceName(stored[BACKUP_DEVICE_NAME_KEY]),
+    claimId: typeof claimId === 'string' && claimId ? claimId : null,
+  };
+}
+
+async function ensureStoredDeviceIdentity(): Promise<BackupDeviceIdentity> {
+  const stored = await readStoredDeviceIdentity();
+  if (stored.claimId) return stored as BackupDeviceIdentity;
+  const identity = {
+    deviceName: stored.deviceName,
+    claimId: crypto.randomUUID(),
+  };
+  await browser.storage.local.set({
+    [BACKUP_DEVICE_NAME_KEY]: identity.deviceName,
+    [BACKUP_DEVICE_CLAIM_ID_KEY]: identity.claimId,
+  });
+  return identity;
+}
+
+async function getDirectory(
+  parent: BackupDirectoryHandle,
+  name: string,
+): Promise<BackupDirectoryHandle> {
+  return (await parent.getDirectoryHandle(name, {
+    create: true,
+  })) as BackupDirectoryHandle;
+}
+
+async function readDeviceClaim(
+  deviceDirectory: BackupDirectoryHandle,
+): Promise<BackupDeviceClaimFile | null> {
+  let fileHandle: FileSystemFileHandle;
+  try {
+    fileHandle = await deviceDirectory.getFileHandle(DEVICE_CLAIM_FILE_NAME);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotFoundError') return null;
+    throw error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(await (await fileHandle.getFile()).text());
+  } catch {
+    return null;
+  }
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    (value as Record<string, unknown>).schemaVersion !== 1 ||
+    (value as Record<string, unknown>).kind !== 'bok-backup-device-claim' ||
+    typeof (value as Record<string, unknown>).deviceName !== 'string' ||
+    typeof (value as Record<string, unknown>).claimId !== 'string' ||
+    typeof (value as Record<string, unknown>).claimedAt !== 'string' ||
+    !Number.isFinite(Date.parse((value as Record<string, string>).claimedAt))
+  ) {
+    return null;
+  }
+  return value as BackupDeviceClaimFile;
+}
+
+async function findDeviceDirectory(
+  devices: BackupDirectoryHandle,
+  deviceName: string,
+): Promise<BackupDirectoryHandle | null> {
+  const matches: BackupDirectoryHandle[] = [];
+  for await (const [name, handle] of devices.entries()) {
+    if (handle.kind === 'directory' && name.toLowerCase() === deviceName) {
+      matches.push(handle as BackupDirectoryHandle);
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `devices 中存在多个与“${deviceName}”大小写等价的目录，请先保留一个后重试`,
+    );
+  }
+  return matches[0] ?? null;
+}
+
+async function writeDeviceClaim(
+  deviceDirectory: BackupDirectoryHandle,
+  identity: BackupDeviceIdentity,
+  previousClaimedAt?: string,
+): Promise<void> {
+  const now = Date.now();
+  const previousTimestamp = previousClaimedAt
+    ? Date.parse(previousClaimedAt)
+    : Number.NaN;
+  const claim: BackupDeviceClaimFile = {
+    schemaVersion: 1,
+    kind: 'bok-backup-device-claim',
+    deviceName: identity.deviceName,
+    claimId: identity.claimId,
+    claimedAt: new Date(
+      Number.isFinite(previousTimestamp) && previousTimestamp >= now
+        ? previousTimestamp + 1
+        : now,
+    ).toISOString(),
+  };
+  await writeVerifiedBackupFile(
+    deviceDirectory,
+    DEVICE_CLAIM_FILE_NAME,
+    `${JSON.stringify(claim, null, 2)}\n`,
+  );
+}
+
+async function claimDeviceDirectory(
+  root: BackupDirectoryHandle,
+  identity: BackupDeviceIdentity,
+  takeOver = false,
+): Promise<BackupDirectoryHandle> {
+  const devices = await getDirectory(root, DEVICES_DIRECTORY_NAME);
+  const device = await findDeviceDirectory(devices, identity.deviceName);
+  if (!device) {
+    const createdDevice = await getDirectory(devices, identity.deviceName);
+    await writeDeviceClaim(createdDevice, identity);
+    return createdDevice;
+  }
+
+  const existing = await readDeviceClaim(device);
+  if (takeOver) {
+    await writeDeviceClaim(device, identity, existing?.claimedAt);
+    return device;
+  }
+  if (
+    !existing ||
+    existing.deviceName !== identity.deviceName ||
+    existing.claimId !== identity.claimId
+  ) {
+    throw new BackupDeviceNameConflictError(identity.deviceName);
+  }
+  return device;
+}
+
+async function requireClaimedBackupDirectories(): Promise<ClaimedBackupDirectories> {
+  const root = await requireWritableBackupDirectory();
+  const identity = await ensureStoredDeviceIdentity();
+  const device = await claimDeviceDirectory(root, identity);
+  const claim = await readDeviceClaim(device);
+  if (
+    !claim ||
+    claim.deviceName !== identity.deviceName ||
+    claim.claimId !== identity.claimId
+  ) {
+    throw new BackupDeviceNameConflictError(identity.deviceName);
+  }
+  const shared = await getDirectory(root, SHARED_DIRECTORY_NAME);
+  return {
+    root,
+    device,
+    shared,
+    generation: claim.claimedAt.replace(/[^0-9A-Za-z]/g, ''),
+    ...identity,
+  };
+}
+
+async function assertCurrentDeviceClaim(
+  root: BackupDirectoryHandle,
+  identity: BackupDeviceIdentity,
+): Promise<void> {
+  const current = await readStoredDeviceIdentity();
+  if (
+    current.deviceName !== identity.deviceName ||
+    current.claimId !== identity.claimId
+  ) {
+    throw new Error('备份设备名称已在操作期间改变，请重试');
+  }
+  const devices = await getDirectory(root, DEVICES_DIRECTORY_NAME);
+  const device = await findDeviceDirectory(devices, identity.deviceName);
+  if (!device) throw new BackupDeviceNameConflictError(identity.deviceName);
+  const claim = await readDeviceClaim(device);
+  if (
+    !claim ||
+    claim.deviceName !== identity.deviceName ||
+    claim.claimId !== identity.claimId
+  ) {
+    throw new BackupDeviceNameConflictError(identity.deviceName);
+  }
+}
+
 function localDayKey(timestamp: number): string {
   const date = new Date(timestamp);
   const year = date.getFullYear();
@@ -260,12 +550,12 @@ function backupErrorMessage(error: unknown): string {
 }
 
 async function failBackup(
-  state: BookmarkBackupState,
   attemptedAt: number,
   error: unknown,
 ): Promise<BookmarkBackupResult> {
+  const latestState = await getBookmarkBackupState();
   const failedState: BookmarkBackupState = {
-    ...state,
+    ...latestState,
     lastAttemptAt: attemptedAt,
     lastError: backupErrorMessage(error),
   };
@@ -332,10 +622,13 @@ async function createWeeklyBackupZip(files: Record<string, string>): Promise<Uin
   });
 }
 
-async function pruneWeeklyBackups(directory: BackupDirectoryHandle): Promise<void> {
+async function pruneWeeklyBackups(
+  directory: BackupDirectoryHandle,
+  pattern: RegExp,
+): Promise<void> {
   const backupNames: string[] = [];
   for await (const [name, handle] of directory.entries()) {
-    if (handle.kind === 'file' && WEEKLY_BACKUP_PATTERN.test(name)) {
+    if (handle.kind === 'file' && pattern.test(name)) {
       backupNames.push(name);
     }
   }
@@ -357,21 +650,28 @@ async function requireWritableBackupDirectory(): Promise<BackupDirectoryHandle> 
 export async function writeBookmarkArchiveBackup(
   store: BookmarkArchiveStore,
 ): Promise<void> {
-  const directory = await requireWritableBackupDirectory();
-  return writeArchiveBackupContents(directory, exportBookmarkArchiveJson(store));
+  const directories = await requireClaimedBackupDirectories();
+  return writeArchiveBackupContents(
+    directories.root,
+    directories,
+    exportBookmarkArchiveJson(store),
+  );
 }
 
 function writeArchiveBackupContents(
-  directory: BackupDirectoryHandle,
+  root: BackupDirectoryHandle,
+  identity: BackupDeviceIdentity,
   contents: string,
 ): Promise<void> {
-  const task = archiveBackupWriteQueue.then(() =>
-    writeVerifiedBackupFile(
-      directory,
+  const task = archiveBackupWriteQueue.then(async () => {
+    await assertCurrentDeviceClaim(root, identity);
+    const shared = await getDirectory(root, SHARED_DIRECTORY_NAME);
+    await writeVerifiedBackupFile(
+      shared,
       BOOKMARK_ARCHIVE_BACKUP_FILE_NAME,
       contents,
-    ),
-  );
+    );
+  });
   archiveBackupWriteQueue = task.then(
     () => undefined,
     () => undefined,
@@ -379,26 +679,81 @@ function writeArchiveBackupContents(
   return task;
 }
 
+function relativeDevicePath(deviceName: string, fileName: string): string {
+  return `${DEVICES_DIRECTORY_NAME}/${deviceName}/${fileName}`;
+}
+
+function relativeSharedPath(fileName: string): string {
+  return `${SHARED_DIRECTORY_NAME}/${fileName}`;
+}
+
+function weeklyFileName(
+  prefix: string,
+  identity: ClaimedBackupDirectories,
+  day: string,
+): string {
+  return `${prefix}${identity.deviceName}-${identity.generation}-${day}.zip`;
+}
+
+function weeklyPattern(
+  prefix: string,
+  identity: ClaimedBackupDirectories,
+): RegExp {
+  return new RegExp(
+    `^${prefix}${identity.deviceName}-${identity.generation}-\\d{4}-\\d{2}-\\d{2}\\.zip$`,
+  );
+}
+
+async function createSettingsBackupContents(timestamp: number): Promise<string> {
+  const [savedPagesAutoArchivePeriod, theme] = await Promise.all([
+    getSavedPagesAutoArchivePeriod(),
+    getThemePreference(),
+  ]);
+  const backup: SettingsBackupFile = {
+    schemaVersion: 1,
+    kind: 'bok-settings-backup',
+    createdAt: new Date(timestamp).toISOString(),
+    settings: { savedPagesAutoArchivePeriod, theme },
+  };
+  return `${JSON.stringify(backup, null, 2)}\n`;
+}
+
 async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResult> {
   const attemptedAt = Date.now();
   const today = localDayKey(attemptedAt);
   const currentWeek = localWeekKey(attemptedAt);
   const state = await getBookmarkBackupState();
-  if (
-    !force &&
-    state.lastSuccessfulBackupDay === today &&
-    state.lastBackupFileName === BOOKMARKS_BACKUP_FILE_NAME &&
-    state.lastSavedPagesBackupFileName === SAVED_PAGES_BACKUP_FILE_NAME &&
-    state.lastArchiveBackupFileName === BOOKMARK_ARCHIVE_BACKUP_FILE_NAME &&
-    state.lastSuccessfulWeeklyBackupWeek === currentWeek
-  ) {
-    return { status: 'already-backed-up', state };
-  }
+  const bookmarksPath = relativeSharedPath(BOOKMARKS_BACKUP_FILE_NAME);
+  const archivePath = relativeSharedPath(BOOKMARK_ARCHIVE_BACKUP_FILE_NAME);
 
   try {
-    const directory = await requireWritableBackupDirectory();
+    const directories = await requireClaimedBackupDirectories();
+    const savedPagesPath = relativeDevicePath(
+      directories.deviceName,
+      SAVED_PAGES_BACKUP_FILE_NAME,
+    );
+    const settingsPath = relativeDevicePath(
+      directories.deviceName,
+      SETTINGS_BACKUP_FILE_NAME,
+    );
+    if (
+      !force &&
+      state.deviceName === directories.deviceName &&
+      state.lastSuccessfulBackupDay === today &&
+      state.lastBackupFileName === bookmarksPath &&
+      state.lastSavedPagesBackupFileName === savedPagesPath &&
+      state.lastSettingsBackupFileName === settingsPath &&
+      state.lastArchiveBackupFileName === archivePath &&
+      state.lastSuccessfulWeeklyBackupWeek === currentWeek &&
+      state.lastSuccessfulSharedWeeklyBackupWeek === currentWeek
+    ) {
+      return { status: 'already-backed-up', state };
+    }
 
-    const savedPagesContents = await exportSessionsJson();
+    const [savedPagesContents, settingsContents] = await Promise.all([
+      exportSessionsJson(),
+      createSettingsBackupContents(attemptedAt),
+    ]);
 
     if (!(await browser.permissions.contains({ permissions: ['bookmarks'] }))) {
       throw new Error('需要先允许 Bok 读取 Chrome 书签');
@@ -417,54 +772,134 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
     const archiveStore = await readBookmarkArchiveStore();
     const archiveContents = exportBookmarkArchiveJson(archiveStore, attemptedAt);
 
+    await assertCurrentDeviceClaim(directories.root, directories);
     await writeVerifiedBackupFile(
-      directory,
+      directories.device,
       SAVED_PAGES_BACKUP_FILE_NAME,
       savedPagesContents,
     );
+    await assertCurrentDeviceClaim(directories.root, directories);
     await writeVerifiedBackupFile(
-      directory,
+      directories.device,
+      SETTINGS_BACKUP_FILE_NAME,
+      settingsContents,
+    );
+    await assertCurrentDeviceClaim(directories.root, directories);
+    await writeVerifiedBackupFile(
+      directories.shared,
       BOOKMARKS_BACKUP_FILE_NAME,
       bookmarksContents,
     );
-    await writeArchiveBackupContents(directory, archiveContents);
+    await writeArchiveBackupContents(
+      directories.root,
+      directories,
+      archiveContents,
+    );
 
-    const weeklyBackupDue = state.lastSuccessfulWeeklyBackupWeek !== currentWeek;
-    const weeklyBackupFileName = weeklyBackupDue
-      ? `${WEEKLY_BACKUP_PREFIX}${today}.zip`
-      : state.lastWeeklyBackupFileName;
-    if (weeklyBackupDue) {
+    const deviceHistoryPath = relativeDevicePath(
+      directories.deviceName,
+      `${HISTORY_DIRECTORY_NAME}/`,
+    );
+    const sharedHistoryPath = relativeSharedPath(`${HISTORY_DIRECTORY_NAME}/`);
+    const deviceWeeklyBackupDue =
+      state.deviceName !== directories.deviceName ||
+      state.lastSuccessfulWeeklyBackupWeek !== currentWeek ||
+      !state.lastWeeklyBackupFileName?.startsWith(deviceHistoryPath);
+    const sharedWeeklyBackupDue =
+      state.deviceName !== directories.deviceName ||
+      state.lastSuccessfulSharedWeeklyBackupWeek !== currentWeek ||
+      !state.lastSharedWeeklyBackupFileName?.startsWith(sharedHistoryPath);
+    const deviceWeeklyBackupFileName = deviceWeeklyBackupDue
+      ? weeklyFileName(
+          DEVICE_WEEKLY_BACKUP_PREFIX,
+          directories,
+          today,
+        )
+      : state.lastWeeklyBackupFileName!.slice(deviceHistoryPath.length);
+    const sharedWeeklyBackupFileName = sharedWeeklyBackupDue
+      ? weeklyFileName(
+          SHARED_WEEKLY_BACKUP_PREFIX,
+          directories,
+          today,
+        )
+      : state.lastSharedWeeklyBackupFileName!.slice(sharedHistoryPath.length);
+    if (deviceWeeklyBackupDue) {
+      const history = await getDirectory(
+        directories.device,
+        HISTORY_DIRECTORY_NAME,
+      );
+      const weeklyZip = await createWeeklyBackupZip({
+        [SAVED_PAGES_BACKUP_FILE_NAME]: savedPagesContents,
+        [SETTINGS_BACKUP_FILE_NAME]: settingsContents,
+      });
+      await assertCurrentDeviceClaim(directories.root, directories);
+      await writeVerifiedBinaryBackupFile(
+        history,
+        deviceWeeklyBackupFileName,
+        weeklyZip,
+      );
+      await assertCurrentDeviceClaim(directories.root, directories);
+      await pruneWeeklyBackups(
+        history,
+        weeklyPattern(DEVICE_WEEKLY_BACKUP_PREFIX, directories),
+      );
+    }
+    if (sharedWeeklyBackupDue) {
+      const history = await getDirectory(
+        directories.shared,
+        HISTORY_DIRECTORY_NAME,
+      );
       const weeklyZip = await createWeeklyBackupZip({
         [BOOKMARKS_BACKUP_FILE_NAME]: bookmarksContents,
-        [SAVED_PAGES_BACKUP_FILE_NAME]: savedPagesContents,
         [BOOKMARK_ARCHIVE_BACKUP_FILE_NAME]: archiveContents,
       });
-      await writeVerifiedBinaryBackupFile(directory, weeklyBackupFileName!, weeklyZip);
-      await pruneWeeklyBackups(directory);
+      await assertCurrentDeviceClaim(directories.root, directories);
+      await writeVerifiedBinaryBackupFile(
+        history,
+        sharedWeeklyBackupFileName,
+        weeklyZip,
+      );
+      await assertCurrentDeviceClaim(directories.root, directories);
+      await pruneWeeklyBackups(
+        history,
+        weeklyPattern(SHARED_WEEKLY_BACKUP_PREFIX, directories),
+      );
     }
 
+    await assertCurrentDeviceClaim(directories.root, directories);
     const successfulState: BookmarkBackupState = {
       schemaVersion: 1,
-      directoryName: directory.name,
+      directoryName: directories.root.name,
+      deviceName: directories.deviceName,
       lastSuccessfulBackupAt: attemptedAt,
       lastSuccessfulBackupDay: today,
-      lastBackupFileName: BOOKMARKS_BACKUP_FILE_NAME,
-      lastSavedPagesBackupFileName: SAVED_PAGES_BACKUP_FILE_NAME,
-      lastArchiveBackupFileName: BOOKMARK_ARCHIVE_BACKUP_FILE_NAME,
-      lastWeeklyBackupAt: weeklyBackupDue
+      lastBackupFileName: bookmarksPath,
+      lastSavedPagesBackupFileName: savedPagesPath,
+      lastSettingsBackupFileName: settingsPath,
+      lastArchiveBackupFileName: archivePath,
+      lastWeeklyBackupAt: deviceWeeklyBackupDue
         ? attemptedAt
         : state.lastWeeklyBackupAt,
-      lastSuccessfulWeeklyBackupWeek: weeklyBackupDue
+      lastSuccessfulWeeklyBackupWeek: deviceWeeklyBackupDue
         ? currentWeek
         : state.lastSuccessfulWeeklyBackupWeek,
-      lastWeeklyBackupFileName: weeklyBackupFileName,
+      lastWeeklyBackupFileName:
+        deviceHistoryPath + deviceWeeklyBackupFileName,
+      lastSharedWeeklyBackupAt: sharedWeeklyBackupDue
+        ? attemptedAt
+        : state.lastSharedWeeklyBackupAt,
+      lastSuccessfulSharedWeeklyBackupWeek: sharedWeeklyBackupDue
+        ? currentWeek
+        : state.lastSuccessfulSharedWeeklyBackupWeek,
+      lastSharedWeeklyBackupFileName:
+        sharedHistoryPath + sharedWeeklyBackupFileName,
       lastAttemptAt: attemptedAt,
       lastError: null,
     };
     await writeBackupState(successfulState);
     return { status: 'success', state: successfulState };
   } catch (error) {
-    return failBackup(state, attemptedAt, error);
+    return failBackup(attemptedAt, error);
   }
 }
 
@@ -478,8 +913,81 @@ export function isBookmarkBackupCommand(value: unknown): value is BookmarkBackup
 }
 
 export async function getBookmarkBackupState(): Promise<BookmarkBackupState> {
-  const stored = await browser.storage.local.get(BOOKMARK_BACKUP_STATE_KEY);
-  return normalizeBackupState(stored[BOOKMARK_BACKUP_STATE_KEY]);
+  const stored = await browser.storage.local.get([
+    BOOKMARK_BACKUP_STATE_KEY,
+    BACKUP_DEVICE_NAME_KEY,
+  ]);
+  return normalizeBackupState(
+    stored[BOOKMARK_BACKUP_STATE_KEY],
+    normalizeBackupDeviceName(stored[BACKUP_DEVICE_NAME_KEY]),
+  );
+}
+
+export async function getBackupDeviceName(): Promise<string> {
+  return (await readStoredDeviceIdentity()).deviceName;
+}
+
+function resetBackupStateForDevice(
+  state: BookmarkBackupState,
+  deviceName: string,
+): BookmarkBackupState {
+  return {
+    ...EMPTY_BACKUP_STATE,
+    directoryName: state.directoryName,
+    deviceName,
+  };
+}
+
+async function storeDeviceIdentity(
+  identity: BackupDeviceIdentity,
+  state: BookmarkBackupState,
+  resetState = true,
+): Promise<BookmarkBackupState> {
+  await browser.storage.local.set({
+    [BACKUP_DEVICE_NAME_KEY]: identity.deviceName,
+    [BACKUP_DEVICE_CLAIM_ID_KEY]: identity.claimId,
+  });
+  const nextState = resetState
+    ? resetBackupStateForDevice(state, identity.deviceName)
+    : { ...state, deviceName: identity.deviceName, lastError: null };
+  await writeBackupState(nextState);
+  return nextState;
+}
+
+export async function saveBackupDeviceName(
+  name: string,
+): Promise<BookmarkBackupState> {
+  const deviceName = validateBackupDeviceName(name);
+  const current = await readStoredDeviceIdentity();
+  const state = await getBookmarkBackupState();
+  const identity = {
+    deviceName,
+    claimId:
+      deviceName === current.deviceName && current.claimId
+        ? current.claimId
+        : crypto.randomUUID(),
+  };
+  const directory = await getBackupDirectoryHandle();
+  if (directory) {
+    if ((await directory.queryPermission({ mode: 'readwrite' })) === 'granted') {
+      await claimDeviceDirectory(directory, identity);
+    }
+  }
+  return storeDeviceIdentity(
+    identity,
+    state,
+    deviceName !== current.deviceName || !current.claimId,
+  );
+}
+
+export async function takeOverBackupDeviceName(
+  name: string,
+): Promise<BookmarkBackupState> {
+  const deviceName = validateBackupDeviceName(name);
+  const directory = await requireWritableBackupDirectory();
+  const identity = { deviceName, claimId: crypto.randomUUID() };
+  await claimDeviceDirectory(directory, identity, true);
+  return storeDeviceIdentity(identity, await getBookmarkBackupState());
 }
 
 export async function getBookmarkBackupDirectoryPermission(): Promise<
@@ -521,7 +1029,17 @@ export async function chooseBookmarkBackupDirectory(): Promise<BookmarkBackupSta
 }
 
 export function runBookmarkBackup(force = false): Promise<BookmarkBackupResult> {
-  if (backupInFlight) return backupInFlight;
+  if (backupInFlight) {
+    if (!force) return backupInFlight;
+    if (!forcedBackupQueued) {
+      const runForcedBackup = () => {
+        forcedBackupQueued = null;
+        return runBookmarkBackup(true);
+      };
+      forcedBackupQueued = backupInFlight.then(runForcedBackup, runForcedBackup);
+    }
+    return forcedBackupQueued;
+  }
   const task = performBookmarkBackup(force);
   backupInFlight = task;
   void task.then(

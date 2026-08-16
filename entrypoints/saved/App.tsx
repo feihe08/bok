@@ -61,8 +61,18 @@ function formatDisplayUrl(url: string): string {
 }
 
 function getGroupTitle(group: SavedGroup): string {
-  if (!group.grouped) return group.title.trim() || '独立标签';
   return group.title.trim() || '未命名标签组';
+}
+
+function getSessionGroups(session: SavedSession): SavedGroup[] {
+  return session.items.flatMap((item) => item.type === 'group' ? [item.group] : []);
+}
+
+function getSessionTabCount(session: SavedSession): number {
+  return session.items.reduce(
+    (total, item) => total + (item.type === 'tab' ? 1 : item.group.tabs.length),
+    0,
+  );
 }
 
 function normalizeSearchText(value: string): string {
@@ -145,8 +155,10 @@ function openSavedTab(event: MouseEvent<HTMLAnchorElement>, url: string) {
 
 function getVisibleSessions(sessions: SavedSession[]): SavedSession[] {
   return sessions.flatMap((session) => {
-    const groups = session.groups.filter((group) => group.tabs.length > 0);
-    return groups.length > 0 ? [{ ...session, groups }] : [];
+    const items = session.items.filter(
+      (item) => item.type === 'tab' || item.group.tabs.length > 0,
+    );
+    return items.length > 0 ? [{ ...session, items }] : [];
   });
 }
 
@@ -517,7 +529,7 @@ function GroupSection({
         <div className="group__identity">
           <span
             className="group__color"
-            data-color={group.grouped ? group.color || 'grey' : 'ungrouped'}
+            data-color={group.color || 'grey'}
             aria-hidden="true"
           />
           {editing ? (
@@ -642,8 +654,8 @@ function SessionSection({
   operationGroups,
   ...groupProps
 }: SessionSectionProps) {
-  const tabCount = session.groups.reduce((total, group) => total + group.tabs.length, 0);
-  const groupedCount = session.groups.filter((group) => group.grouped).length;
+  const groups = getSessionGroups(session);
+  const tabCount = getSessionTabCount(session);
 
   return (
     <section className="session" aria-labelledby={`session-${session.id}`}>
@@ -655,12 +667,12 @@ function SessionSection({
         </h2>
         <p>
           {tabCount} 个标签
-          {groupedCount > 0 ? ` · ${groupedCount} 个标签组` : ''}
+          {groups.length > 0 ? ` · ${groups.length} 个标签组` : ''}
         </p>
       </header>
 
       <div className="groups">
-        {session.groups.map((group) => (
+        {groups.map((group) => (
           <GroupSection
             key={group.id}
             {...groupProps}
@@ -709,7 +721,7 @@ export default function App() {
     const index = new Map<string, string>();
 
     for (const session of visibleSessions ?? []) {
-      for (const group of session.groups) {
+      for (const group of getSessionGroups(session)) {
         for (const tab of group.tabs) {
           index.set(
             getSearchKey(session.id, group.id, tab.id),
@@ -724,7 +736,7 @@ export default function App() {
   const operationGroups = useMemo(() => {
     const index = new Map<string, SavedGroup>();
     for (const session of visibleSessions ?? []) {
-      for (const group of session.groups) {
+      for (const group of getSessionGroups(session)) {
         index.set(getGroupKey(session.id, group.id), group);
       }
     }
@@ -735,20 +747,22 @@ export default function App() {
 
     const matches: SavedSession[] = [];
     for (const session of visibleSessions) {
-      const groups: SavedGroup[] = [];
-      for (const group of session.groups) {
-        const tabs = group.tabs.filter((tab) => {
+      const items = session.items.flatMap<SavedSession['items'][number]>((item) => {
+        if (item.type === 'tab') return [];
+        const tabs = item.group.tabs.filter((tab) => {
           const searchText = searchIndex.get(
-            getSearchKey(session.id, group.id, tab.id),
+            getSearchKey(session.id, item.group.id, tab.id),
           );
           return (
             searchText !== undefined &&
             searchTerms.every((term) => searchText.includes(term))
           );
         });
-        if (tabs.length > 0) groups.push({ ...group, tabs });
-      }
-      if (groups.length > 0) matches.push({ ...session, groups });
+        return tabs.length > 0
+          ? [{ type: 'group', group: { ...item.group, tabs } }]
+          : [];
+      });
+      if (items.length > 0) matches.push({ ...session, items });
     }
     return matches;
   }, [visibleSessions, searchIndex, searchTerms]);
@@ -756,11 +770,7 @@ export default function App() {
     () =>
       visibleSessions?.reduce(
         (sessionTotal, session) =>
-          sessionTotal +
-          session.groups.reduce(
-            (groupTotal, group) => groupTotal + group.tabs.length,
-            0,
-          ),
+          sessionTotal + getSessionTabCount(session),
         0,
       ),
     [visibleSessions],
@@ -769,11 +779,7 @@ export default function App() {
     () =>
       filteredSessions?.reduce(
         (sessionTotal, session) =>
-          sessionTotal +
-          session.groups.reduce(
-            (groupTotal, group) => groupTotal + group.tabs.length,
-            0,
-          ),
+          sessionTotal + getSessionTabCount(session),
         0,
       ),
     [filteredSessions],

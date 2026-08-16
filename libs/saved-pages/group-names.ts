@@ -24,9 +24,9 @@ export function collectGroupedTitles(
 ): Set<string> {
   return new Set(
     sessions.flatMap((session) =>
-      session.groups.flatMap((group) =>
-        group.grouped && group.id !== excludeGroupId
-          ? [getSavedGroupTitle(group)]
+      session.items.flatMap((item) =>
+        item.type === 'group' && item.group.id !== excludeGroupId
+          ? [getSavedGroupTitle(item.group)]
           : [],
       ),
     ),
@@ -34,22 +34,20 @@ export function collectGroupedTitles(
 }
 
 /**
- * Normalize historical tag-group names and resolve duplicates oldest-first.
- * Ordinary groups are deliberately ignored and may continue sharing names.
+ * Normalize historical Chrome-group names and resolve duplicates oldest-first.
+ * Direct session tabs do not participate in group-name uniqueness.
  */
 export function ensureUniqueGroupedTitlesInMemory(
   sessions: SavedSession[],
 ): GroupedTitleChange[] {
   const grouped = sessions
     .flatMap((session, sessionIndex) =>
-      session.groups.map((group, groupIndex) => ({
-        session,
-        sessionIndex,
-        group,
-        groupIndex,
-      })),
+      session.items.flatMap((item, groupIndex) =>
+        item.type === 'group'
+          ? [{ session, sessionIndex, group: item.group, groupIndex }]
+          : [],
+      ),
     )
-    .filter(({ group }) => group.grouped)
     .sort(
       (left, right) =>
         left.group.createdAt - right.group.createdAt ||

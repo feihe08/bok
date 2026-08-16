@@ -19,6 +19,7 @@ import type {
   TaskStatus,
 } from '../../libs/saved-pages/model';
 import { readSessions } from '../../libs/saved-pages/persistence';
+import { THEME_PREFERENCE_KEY } from '../../libs/saved-pages/settings';
 
 type TaskFilter = 'all' | TaskStatus;
 type OpenGroupOptions = {
@@ -28,12 +29,28 @@ type OpenGroupOptions = {
 type Theme = 'light' | 'dark';
 type ArchiveView = 'current' | 'archived';
 type ManagedGroup = SavedGroup & { sessionId: string };
+type ManagedSessionItem =
+  | { type: 'tab'; tab: SavedTab; sessionId: string; groupId: string }
+  | { type: 'group'; group: ManagedGroup };
+type ManagedSession = {
+  id: string;
+  createdAt: number;
+  title: string;
+  locked: boolean;
+  pinned: boolean;
+  restoredAt: number | null;
+  archivedAt: number | null;
+  taskStatus: TaskStatus | null;
+  taskCompletedAt: number | null;
+  totalTabCount: number;
+  items: ManagedSessionItem[];
+};
 type ActionNotice = {
   type: 'success' | 'error';
   message: string;
   persistent?: boolean;
 };
-type TaskCounts = Record<TaskStatus, { groups: number; tabs: number }>;
+type TaskCounts = Record<TaskStatus, { sessions: number; groups: number; tabs: number }>;
 
 const THEME_STORAGE_KEY = 'bok-theme';
 
@@ -55,30 +72,97 @@ const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
   done: 'Done',
 };
 
-function getManagedGroups(sessions: SavedSession[]): ManagedGroup[] {
+function getManagedSessions(sessions: SavedSession[]): ManagedSession[] {
   return [...sessions]
     .sort((a, b) => b.createdAt - a.createdAt)
-    .flatMap((session) =>
-      session.groups
-        .filter((group) => group.tabs.length > 0)
-        .map((group) => ({ ...group, sessionId: session.id })),
-    );
+    .map((session) => {
+      const items = session.items.flatMap<ManagedSessionItem>((item) => {
+        if (item.type === 'tab') {
+          return [{
+            type: 'tab',
+            tab: item.tab,
+            sessionId: session.id,
+            groupId: `tab:${item.tab.id}`,
+          }];
+        }
+        return item.group.tabs.length > 0
+          ? [{
+              type: 'group',
+              group: { ...item.group, sessionId: session.id },
+            }]
+          : [];
+      });
+      return {
+        id: session.id,
+        createdAt: session.createdAt,
+        title: session.title,
+        locked: session.locked,
+        pinned: session.pinned,
+        restoredAt: session.restoredAt,
+        archivedAt: session.archivedAt,
+        taskStatus: session.taskStatus,
+        taskCompletedAt: session.taskCompletedAt,
+        totalTabCount: items.reduce(
+          (total, item) => total + (item.type === 'tab' ? 1 : item.group.tabs.length),
+          0,
+        ),
+        items,
+      };
+    })
+    .filter((session) => session.items.length > 0);
 }
 
-function getGroupsForView(
-  groups: ManagedGroup[],
+function getSessionsForView(
+  sessions: ManagedSession[],
   archiveView: ArchiveView,
-): ManagedGroup[] {
-  const visible = groups.filter((group) =>
-    archiveView === 'archived' ? group.archivedAt !== null : group.archivedAt === null,
-  );
-
-  return visible.sort((a, b) => {
-    if (archiveView === 'archived') {
-      return (b.archivedAt ?? 0) - (a.archivedAt ?? 0);
+): ManagedSession[] {
+  return sessions.flatMap((session) => {
+    if (session.archivedAt !== null) {
+      return archiveView === 'archived' ? [session] : [];
     }
-    return Number(b.pinned) - Number(a.pinned);
+
+    const items = session.items.filter((item) => {
+      const archivedAt = item.type === 'tab'
+        ? item.tab.archivedAt
+        : item.group.archivedAt;
+      return archiveView === 'archived' ? archivedAt !== null : archivedAt === null;
+    });
+    return items.length > 0 ? [{ ...session, items }] : [];
   });
+}
+
+function getSingleBrowserGroup(session: ManagedSession): ManagedGroup | null {
+  if (session.items.length !== 1) return null;
+  const [item] = session.items;
+  return item.type === 'group' ? item.group : null;
+}
+
+function getMergedBrowserGroup(session: ManagedSession): ManagedGroup | null {
+  if (
+    session.title.trim() ||
+    session.locked ||
+    session.pinned ||
+    session.archivedAt !== null ||
+    session.taskStatus !== null
+  ) {
+    return null;
+  }
+  return getSingleBrowserGroup(session);
+}
+
+function hasLockedGroup(session: ManagedSession): boolean {
+  return session.items.some(
+    (item) => item.type === 'group' && item.group.locked,
+  );
+}
+
+function getSessionTitle(session: ManagedSession): string {
+  return session.title.trim() || `${session.totalTabCount} 个标签`;
+}
+
+function getSessionNavigationTitle(session: ManagedSession): string {
+  const singleGroup = getMergedBrowserGroup(session);
+  return singleGroup ? getGroupTitle(singleGroup) : getSessionTitle(session);
 }
 
 function getGroupTitle(group: SavedGroup): string {
@@ -187,28 +271,65 @@ function matchesTaskFilter(group: SavedGroup, filter: TaskFilter): boolean {
   return group.taskStatus === filter || group.tabs.some((tab) => tab.taskStatus === filter);
 }
 
-function filterGroups(
-  groups: ManagedGroup[],
+function filterSessions(
+  sessions: ManagedSession[],
   searchTerms: string[],
   taskFilter: TaskFilter,
-): ManagedGroup[] {
-  return groups.flatMap((group) => {
-    if (!matchesTaskFilter(group, taskFilter)) return [];
-
-    const groupTitle = normalizeSearchText(getGroupTitle(group));
-    const groupMatches = searchTerms.every((term) => groupTitle.includes(term));
-    const tabs = group.tabs.filter((tab) => {
-      if (taskFilter !== 'all' && group.taskStatus !== taskFilter) {
-        if (tab.taskStatus !== taskFilter) return false;
+): ManagedSession[] {
+  return sessions.flatMap((session) => {
+    const sessionSearchText = normalizeSearchText(getSessionTitle(session));
+    const sessionMatchesSearch =
+      searchTerms.length > 0 &&
+      searchTerms.every((term) => sessionSearchText.includes(term));
+    const sessionMatchesTask =
+      taskFilter !== 'all' && session.taskStatus === taskFilter;
+    const items = session.items.flatMap<ManagedSessionItem>((item) => {
+      if (item.type === 'tab') {
+        if (
+          taskFilter !== 'all' &&
+          !sessionMatchesTask &&
+          item.tab.taskStatus !== taskFilter
+        ) return [];
+        if (searchTerms.length === 0 || sessionMatchesSearch) return [item];
+        const searchText = normalizeSearchText(`${item.tab.title}\n${item.tab.url}`);
+        return searchTerms.every((term) => searchText.includes(term)) ? [item] : [];
       }
-      if (searchTerms.length === 0 || groupMatches) return true;
 
-      const searchText = normalizeSearchText(`${tab.title}\n${tab.url}`);
-      return searchTerms.every((term) => searchText.includes(term));
+      const group = item.group;
+      if (!sessionMatchesTask && !matchesTaskFilter(group, taskFilter)) return [];
+
+      const groupTitle = normalizeSearchText(getGroupTitle(group));
+      const groupMatches =
+        sessionMatchesSearch ||
+        searchTerms.every((term) => groupTitle.includes(term));
+      const tabs = group.tabs.filter((tab) => {
+        if (
+          taskFilter !== 'all' &&
+          !sessionMatchesTask &&
+          group.taskStatus !== taskFilter
+        ) {
+          if (tab.taskStatus !== taskFilter) return false;
+        }
+        if (searchTerms.length === 0 || groupMatches) return true;
+
+        const searchText = normalizeSearchText(`${tab.title}\n${tab.url}`);
+        return searchTerms.every((term) => searchText.includes(term));
+      });
+
+      return tabs.length > 0
+        ? [{ type: 'group', group: { ...group, tabs } }]
+        : [];
     });
 
-    return tabs.length > 0 ? [{ ...group, tabs }] : [];
+    return items.length > 0 ? [{ ...session, items }] : [];
   });
+}
+
+function countVisibleSessionTabs(session: ManagedSession): number {
+  return session.items.reduce(
+    (total, item) => total + (item.type === 'tab' ? 1 : item.group.tabs.length),
+    0,
+  );
 }
 
 function openChromeUrl(event: MouseEvent<HTMLAnchorElement>, url: string) {
@@ -290,33 +411,49 @@ function CurrentViewIcon() {
 }
 
 export default function BokPage() {
-  const [groups, setGroups] = useState<ManagedGroup[]>([]);
+  const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [retryCount, setRetryCount] = useState(0);
   const [searchValue, setSearchValue] = useState('');
   const [archiveView, setArchiveView] = useState<ArchiveView>('current');
   const [taskFilter, setTaskFilter] = useState<TaskFilter>('all');
-  const [activeGroupId, setActiveGroupId] = useState('');
+  const [activeSessionId, setActiveSessionId] = useState('');
   const [openMenuGroupId, setOpenMenuGroupId] = useState('');
+  const [openMenuSessionId, setOpenMenuSessionId] = useState('');
   const [openingGroupId, setOpeningGroupId] = useState('');
+  const [openingSessionId, setOpeningSessionId] = useState('');
   const [changingGroupId, setChangingGroupId] = useState('');
+  const [changingSessionId, setChangingSessionId] = useState('');
   const [changingTabId, setChangingTabId] = useState('');
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [openingBookmarkManager, setOpeningBookmarkManager] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState('');
   const [groupTitleDraft, setGroupTitleDraft] = useState('');
+  const [editingSessionId, setEditingSessionId] = useState('');
+  const [sessionTitleDraft, setSessionTitleDraft] = useState('');
   const groupTitleButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const sessionTitleButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const tabTaskButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const tabTaskStatusRefs = useRef(new Map<string, HTMLSelectElement>());
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const sessionMenuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const groupTaskButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const groupDeleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const menuItemRefs = useRef(new Map<string, Array<HTMLButtonElement | undefined>>());
+  const sessionMenuItemRefs = useRef(
+    new Map<string, Array<HTMLButtonElement | undefined>>(),
+  );
   const savingGroupTitleIds = useRef(new Set<string>());
   const cancellingGroupTitleIds = useRef(new Set<string>());
+  const savingSessionTitleIds = useRef(new Set<string>());
+  const cancellingSessionTitleIds = useRef(new Set<string>());
+  const openingCommandRef = useRef(false);
   const [theme, setTheme] = useState<Theme | null>(storedTheme);
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
+  const [collapsedSessionIds, setCollapsedSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -330,40 +467,77 @@ export default function BokPage() {
         .filter(Boolean),
     [deferredSearchValue],
   );
-  const viewGroups = useMemo(
-    () => getGroupsForView(groups, archiveView),
-    [groups, archiveView],
+  const filtersActive = searchTerms.length > 0 || taskFilter !== 'all';
+  const groups = useMemo(
+    () => sessions.flatMap((session) =>
+      session.items.flatMap((item) => item.type === 'group' ? [item.group] : []),
+    ),
+    [sessions],
   );
-  const visibleGroups = useMemo(
-    () => filterGroups(viewGroups, searchTerms, taskFilter),
-    [viewGroups, searchTerms, taskFilter],
+  const viewSessions = useMemo(
+    () => getSessionsForView(sessions, archiveView),
+    [sessions, archiveView],
+  );
+  const visibleSessions = useMemo(
+    () => filterSessions(viewSessions, searchTerms, taskFilter),
+    [viewSessions, searchTerms, taskFilter],
+  );
+  const sessionsById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
   );
   const totalTabCount = useMemo(
-    () => viewGroups.reduce((total, group) => total + group.tabs.length, 0),
-    [viewGroups],
+    () => viewSessions.reduce(
+      (total, session) => total + countVisibleSessionTabs(session),
+      0,
+    ),
+    [viewSessions],
+  );
+  const visibleTabCount = useMemo(
+    () => visibleSessions.reduce(
+      (total, session) => total + countVisibleSessionTabs(session),
+      0,
+    ),
+    [visibleSessions],
   );
   const taskCounts = useMemo<TaskCounts>(() => {
     const counts: TaskCounts = {
-      todo: { groups: 0, tabs: 0 },
-      doing: { groups: 0, tabs: 0 },
-      done: { groups: 0, tabs: 0 },
+      todo: { sessions: 0, groups: 0, tabs: 0 },
+      doing: { sessions: 0, groups: 0, tabs: 0 },
+      done: { sessions: 0, groups: 0, tabs: 0 },
     };
-    for (const group of viewGroups) {
-      if (group.taskStatus) counts[group.taskStatus].groups += 1;
-      for (const tab of group.tabs) {
-        if (tab.taskStatus) counts[tab.taskStatus].tabs += 1;
+    for (const session of viewSessions) {
+      if (session.taskStatus) counts[session.taskStatus].sessions += 1;
+      for (const item of session.items) {
+        if (item.type === 'tab') {
+          if (item.tab.taskStatus) counts[item.tab.taskStatus].tabs += 1;
+          continue;
+        }
+        if (item.group.taskStatus) counts[item.group.taskStatus].groups += 1;
+        for (const tab of item.group.tabs) {
+          if (tab.taskStatus) counts[tab.taskStatus].tabs += 1;
+        }
       }
     }
     return counts;
-  }, [viewGroups]);
+  }, [viewSessions]);
   const archiveCounts = useMemo(() => {
     const counts: Record<ArchiveView, number> = { current: 0, archived: 0 };
-    for (const group of groups) {
-      const target = group.archivedAt === null ? 'current' : 'archived';
-      counts[target] += group.tabs.length;
+    for (const session of sessions) {
+      if (session.archivedAt !== null) {
+        counts.archived += session.totalTabCount;
+        continue;
+      }
+      for (const item of session.items) {
+        const archivedAt = item.type === 'tab'
+          ? item.tab.archivedAt
+          : item.group.archivedAt;
+        const target = archivedAt === null ? 'current' : 'archived';
+        counts[target] += item.type === 'tab' ? 1 : item.group.tabs.length;
+      }
     }
     return counts;
-  }, [groups]);
+  }, [sessions]);
 
   useEffect(() => {
     void browser.runtime
@@ -378,7 +552,7 @@ export default function BokPage() {
       try {
         const { sessions, recoveryEntryCount } = await readSessions();
         if (cancelled) return;
-        setGroups(getManagedGroups(sessions));
+        setSessions(getManagedSessions(sessions));
         setLoadError('');
         if (recoveryEntryCount > 0) {
           setActionNotice({
@@ -416,18 +590,55 @@ export default function BokPage() {
   }, [retryCount]);
 
   useEffect(() => {
-    setActiveGroupId((current) =>
-      visibleGroups.some((group) => group.id === current)
+    setActiveSessionId((current) =>
+      visibleSessions.some((session) => session.id === current)
         ? current
-        : (visibleGroups[0]?.id ?? ''),
+        : (visibleSessions[0]?.id ?? ''),
     );
-  }, [visibleGroups]);
+  }, [visibleSessions]);
 
   useEffect(() => {
     if (!actionNotice || actionNotice.type === 'error' || actionNotice.persistent) return;
     const timeoutId = window.setTimeout(() => setActionNotice(null), 5500);
     return () => window.clearTimeout(timeoutId);
   }, [actionNotice]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const legacyTheme = getStoredTheme();
+
+    void browser.storage.local
+      .get(THEME_PREFERENCE_KEY)
+      .then((stored) => {
+        if (legacyTheme) {
+          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
+          return browser.storage.local
+            .set({ [THEME_PREFERENCE_KEY]: legacyTheme })
+            .then(() =>
+              browser.runtime.sendMessage({
+                type: 'bok/bookmark-backup',
+                force: true,
+              }),
+            );
+        }
+
+        const preference = stored[THEME_PREFERENCE_KEY];
+        if (
+          cancelled ||
+          (preference !== 'light' && preference !== 'dark')
+        ) {
+          return;
+        }
+        localStorage.setItem(THEME_STORAGE_KEY, preference);
+        document.documentElement.dataset.theme = preference;
+        setTheme(preference);
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -465,9 +676,36 @@ export default function BokPage() {
   }, [openMenuGroupId]);
 
   useEffect(() => {
+    if (!openMenuSessionId) return;
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest('.session-more')?.getAttribute('data-session-id') ===
+        openMenuSessionId
+      ) {
+        return;
+      }
+      setOpenMenuSessionId('');
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') closeSessionMenu(true);
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openMenuSessionId]);
+
+  useEffect(() => {
     let frameId = 0;
 
-    function updateActiveGroup() {
+    function updateActiveSession() {
       if (frameId) return;
 
       frameId = requestAnimationFrame(() => {
@@ -476,45 +714,53 @@ export default function BokPage() {
           getComputedStyle(document.documentElement).getPropertyValue('--topbar-height'),
         );
         const activationTop = (Number.isFinite(topbarHeight) ? topbarHeight : 64) + 20;
-        let nextGroupId = visibleGroups[0]?.id ?? '';
+        let nextSessionId = visibleSessions[0]?.id ?? '';
 
-        for (const group of visibleGroups) {
-          const element = document.getElementById(`group-${group.id}`);
+        for (const session of visibleSessions) {
+          const element = document.getElementById(`session-${session.id}`);
           if (!element || element.getBoundingClientRect().top > activationTop) break;
-          nextGroupId = group.id;
+          nextSessionId = session.id;
         }
 
-        setActiveGroupId((current) =>
-          current === nextGroupId ? current : nextGroupId,
+        setActiveSessionId((current) =>
+          current === nextSessionId ? current : nextSessionId,
         );
       });
     }
 
-    updateActiveGroup();
-    window.addEventListener('scroll', updateActiveGroup, { passive: true });
-    window.addEventListener('resize', updateActiveGroup);
+    updateActiveSession();
+    window.addEventListener('scroll', updateActiveSession, { passive: true });
+    window.addEventListener('resize', updateActiveSession);
     return () => {
-      window.removeEventListener('scroll', updateActiveGroup);
-      window.removeEventListener('resize', updateActiveGroup);
+      window.removeEventListener('scroll', updateActiveSession);
+      window.removeEventListener('resize', updateActiveSession);
       if (frameId) cancelAnimationFrame(frameId);
     };
-  }, [visibleGroups]);
+  }, [visibleSessions]);
 
-  function goToGroup(groupId: string) {
-    setActiveGroupId(groupId);
-    setCollapsedGroupIds((current) => {
-      if (!current.has(groupId)) return current;
+  function goToSession(sessionId: string) {
+    setActiveSessionId(sessionId);
+    setCollapsedSessionIds((current) => {
+      if (!current.has(sessionId)) return current;
       const next = new Set(current);
-      next.delete(groupId);
+      next.delete(sessionId);
       return next;
     });
-
     requestAnimationFrame(() => {
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      document.getElementById(`group-${groupId}`)?.scrollIntoView({
+      document.getElementById(`session-${sessionId}`)?.scrollIntoView({
         behavior: reduceMotion ? 'auto' : 'smooth',
         block: 'start',
       });
+    });
+  }
+
+  function toggleSession(sessionId: string) {
+    setCollapsedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
     });
   }
 
@@ -607,6 +853,7 @@ export default function BokPage() {
   }
 
   function openGroupMenu(groupId: string, position: 'first' | 'last' = 'first') {
+    setOpenMenuSessionId('');
     setOpenMenuGroupId(groupId);
     requestAnimationFrame(() => {
       const items = (menuItemRefs.current.get(groupId) ?? []).filter(
@@ -667,6 +914,109 @@ export default function BokPage() {
     }
   }
 
+  function focusSessionTitleButton(sessionId: string) {
+    requestAnimationFrame(() => sessionTitleButtonRefs.current.get(sessionId)?.focus());
+  }
+
+  function focusSessionMenuTrigger(sessionId: string) {
+    window.setTimeout(() => {
+      const trigger = sessionMenuTriggerRefs.current.get(sessionId);
+      if (trigger?.isConnected && !trigger.disabled) {
+        trigger.focus();
+        return;
+      }
+      document.getElementById('saved-groups')?.focus();
+    }, 120);
+  }
+
+  function setSessionMenuItemRef(
+    sessionId: string,
+    index: number,
+    element: HTMLButtonElement | null,
+  ) {
+    const items = sessionMenuItemRefs.current.get(sessionId) ?? [];
+    if (element) {
+      element.tabIndex = -1;
+      items[index] = element;
+    } else {
+      delete items[index];
+    }
+    sessionMenuItemRefs.current.set(sessionId, items);
+  }
+
+  function closeSessionMenu(restoreFocus = false) {
+    const sessionId = openMenuSessionId;
+    setOpenMenuSessionId('');
+    if (restoreFocus && sessionId) focusSessionMenuTrigger(sessionId);
+  }
+
+  function openSessionMenu(
+    sessionId: string,
+    position: 'first' | 'last' = 'first',
+  ) {
+    setOpenMenuGroupId('');
+    setOpenMenuSessionId(sessionId);
+    requestAnimationFrame(() => {
+      const items = (sessionMenuItemRefs.current.get(sessionId) ?? []).filter(
+        (item): item is HTMLButtonElement => Boolean(item && !item.disabled),
+      );
+      focusMenuItem(items, position === 'first' ? items[0] : items.at(-1));
+    });
+  }
+
+  function handleSessionMenuTriggerKeyDown(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    sessionId: string,
+  ) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      openSessionMenu(sessionId, 'first');
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      openSessionMenu(sessionId, 'last');
+    } else if (event.key === 'Escape' && openMenuSessionId === sessionId) {
+      event.preventDefault();
+      closeSessionMenu(true);
+    }
+  }
+
+  function handleSessionMenuKeyDown(
+    event: ReactKeyboardEvent<HTMLDivElement>,
+    sessionId: string,
+  ) {
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      const trigger = sessionMenuTriggerRefs.current.get(sessionId);
+      const nextButton = trigger?.parentElement?.nextElementSibling;
+      setOpenMenuSessionId('');
+      requestAnimationFrame(() => {
+        if (event.shiftKey) trigger?.focus();
+        else if (nextButton instanceof HTMLButtonElement) nextButton.focus();
+      });
+      return;
+    }
+
+    const items = (sessionMenuItemRefs.current.get(sessionId) ?? []).filter(
+      (item): item is HTMLButtonElement => Boolean(item && !item.disabled),
+    );
+    if (items.length === 0) return;
+
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    let targetIndex: number | null = null;
+    if (event.key === 'ArrowDown') targetIndex = (currentIndex + 1 + items.length) % items.length;
+    if (event.key === 'ArrowUp') targetIndex = (currentIndex - 1 + items.length) % items.length;
+    if (event.key === 'Home') targetIndex = 0;
+    if (event.key === 'End') targetIndex = items.length - 1;
+
+    if (targetIndex !== null) {
+      event.preventDefault();
+      focusMenuItem(items, items[targetIndex]);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closeSessionMenu(true);
+    }
+  }
+
   async function runCommand(command: SavedPageCommand) {
     const response = (await browser.runtime.sendMessage(command)) as SavedPageResponse;
     if (!response) {
@@ -690,6 +1040,25 @@ export default function BokPage() {
       });
       setActionNotice({ type: 'success', message: `已删除“${tab.title}”` });
       focusMenuTrigger(group.id);
+    } catch (error) {
+      showCommandError('删除标签', error);
+    }
+  }
+
+  async function deleteDirectTab(item: Extract<ManagedSessionItem, { type: 'tab' }>) {
+    const session = sessions.find((candidate) => candidate.id === item.sessionId);
+    if (session?.locked) {
+      setActionNotice({ type: 'error', message: '保存记录已锁定，无法删除标签。' });
+      return;
+    }
+    try {
+      await runCommand({
+        type: 'bok/remove-tab',
+        sessionId: item.sessionId,
+        tabId: item.tab.id,
+      });
+      setActionNotice({ type: 'success', message: `已删除“${item.tab.title}”` });
+      requestAnimationFrame(() => document.getElementById('saved-groups')?.focus());
     } catch (error) {
       showCommandError('删除标签', error);
     }
@@ -729,34 +1098,6 @@ export default function BokPage() {
     }
   }
 
-  async function convertGroup(group: ManagedGroup) {
-    if (changingGroupId || group.grouped) return;
-    closeGroupMenu();
-    setChangingGroupId(group.id);
-
-    try {
-      const result = await runCommand({
-        type: 'bok/convert-group',
-        sessionId: group.sessionId,
-        groupId: group.id,
-      });
-      if (!result || !('groupTitle' in result)) {
-        throw new Error('后台没有返回转换结果');
-      }
-      setActionNotice({
-        type: 'success',
-        message: result.renamed
-          ? `名称重复，已重命名为“${result.groupTitle}”并转换为标签组`
-          : '已转换为标签组',
-      });
-    } catch (error) {
-      showCommandError('转换为标签组', error);
-    } finally {
-      setChangingGroupId('');
-      focusMenuTrigger(group.id);
-    }
-  }
-
   async function togglePinned(group: ManagedGroup) {
     if (changingGroupId || group.archivedAt !== null) return;
     closeGroupMenu();
@@ -771,7 +1112,7 @@ export default function BokPage() {
       });
       setActionNotice({
         type: 'success',
-        message: group.pinned ? '已取消固定' : '已固定到顶部',
+        message: group.pinned ? '已取消固定' : '已固定，将跳过自动归档',
       });
     } catch (error) {
       showCommandError('更新固定状态', error);
@@ -919,7 +1260,8 @@ export default function BokPage() {
   }
 
   async function setTabTaskStatus(
-    group: ManagedGroup,
+    sessionId: string,
+    groupId: string,
     tab: SavedTab,
     status: TaskStatus | null,
   ) {
@@ -930,8 +1272,8 @@ export default function BokPage() {
     try {
       await runCommand({
         type: 'bok/set-tab-task-status',
-        sessionId: group.sessionId,
-        groupId: group.id,
+        sessionId,
+        groupId,
         tabId: tab.id,
         status,
       });
@@ -960,15 +1302,16 @@ export default function BokPage() {
 
   async function deleteGroup(group: ManagedGroup) {
     closeGroupMenu();
-    if (group.locked) {
+    const storedGroup = groups.find((candidate) => candidate.id === group.id) ?? group;
+    if (storedGroup.locked) {
       setActionNotice({ type: 'error', message: '分组已锁定，无法删除。' });
       focusGroupDeleteButton(group.id);
       return;
     }
-    const title = getGroupTitle(group);
+    const title = getGroupTitle(storedGroup);
     if (
       !window.confirm(
-        `从 Bok 保存记录中永久删除整个分组“${title}”及其中 ${group.tabs.length} 个标签？此操作无法恢复。`,
+        `从 Bok 保存记录中永久删除整个分组“${title}”及其中 ${storedGroup.tabs.length} 个标签？此操作无法恢复。`,
       )
     ) {
       focusGroupDeleteButton(group.id);
@@ -978,8 +1321,8 @@ export default function BokPage() {
     try {
       await runCommand({
         type: 'bok/remove-group',
-        sessionId: group.sessionId,
-        groupId: group.id,
+        sessionId: storedGroup.sessionId,
+        groupId: storedGroup.id,
       });
       setActionNotice({ type: 'success', message: `已删除分组“${title}”` });
       requestAnimationFrame(() => document.getElementById('saved-groups')?.focus());
@@ -989,11 +1332,236 @@ export default function BokPage() {
     }
   }
 
+  async function openSession(
+    session: ManagedSession,
+    destination: 'current-window' | 'new-window',
+    restoreMenuFocus = false,
+  ) {
+    if (openingCommandRef.current || openingSessionId || openingGroupId) return;
+    openingCommandRef.current = true;
+    closeGroupMenu();
+    closeSessionMenu();
+    setOpeningSessionId(session.id);
+
+    try {
+      const result = await runCommand({
+        type: 'bok/open-session',
+        sessionId: session.id,
+        destination,
+      });
+      const openedTabs = result && 'openedTabs' in result
+        ? result.openedTabs
+        : session.totalTabCount;
+      const openedGroups = result && 'openedGroups' in result
+        ? result.openedGroups
+        : 0;
+      const reusedSyncedGroup = Boolean(
+        result && 'reusedSyncedGroup' in result && result.reusedSyncedGroup,
+      );
+      setActionNotice({
+        type: 'success',
+        message: reusedSyncedGroup
+          ? '已切换到打开中的同步标签组，未创建重复标签。'
+          : `已打开 ${openedTabs} 个标签${openedGroups > 0 ? `、${openedGroups} 个标签组` : ''}，保存记录仍保留。`,
+        persistent: true,
+      });
+    } catch (error) {
+      showCommandError('打开保存记录', error);
+    } finally {
+      openingCommandRef.current = false;
+      setOpeningSessionId('');
+      if (restoreMenuFocus) focusSessionMenuTrigger(session.id);
+    }
+  }
+
+  function startEditingSession(session: ManagedSession) {
+    closeSessionMenu();
+    cancellingSessionTitleIds.current.delete(session.id);
+    setEditingSessionId(session.id);
+    setSessionTitleDraft(getSessionTitle(session));
+  }
+
+  async function saveSessionTitle(session: ManagedSession) {
+    if (cancellingSessionTitleIds.current.delete(session.id)) return;
+    if (savingSessionTitleIds.current.has(session.id)) return;
+    savingSessionTitleIds.current.add(session.id);
+    const title = sessionTitleDraft.trim();
+    setEditingSessionId('');
+    setSessionTitleDraft('');
+    focusSessionTitleButton(session.id);
+
+    if (title === getSessionTitle(session)) {
+      savingSessionTitleIds.current.delete(session.id);
+      return;
+    }
+
+    try {
+      await runCommand({ type: 'bok/rename-session', sessionId: session.id, title });
+      setActionNotice({ type: 'success', message: '保存记录名称已更新' });
+    } catch (error) {
+      showCommandError('重命名保存记录', error);
+    } finally {
+      savingSessionTitleIds.current.delete(session.id);
+    }
+  }
+
+  function cancelSessionTitleEdit(sessionId: string) {
+    cancellingSessionTitleIds.current.add(sessionId);
+    setEditingSessionId('');
+    setSessionTitleDraft('');
+    focusSessionTitleButton(sessionId);
+  }
+
+  async function toggleSessionPinned(session: ManagedSession) {
+    if (changingSessionId || session.archivedAt !== null) return;
+    closeSessionMenu();
+    setChangingSessionId(session.id);
+    try {
+      await runCommand({
+        type: 'bok/set-session-pinned',
+        sessionId: session.id,
+        pinned: !session.pinned,
+      });
+      setActionNotice({
+        type: 'success',
+        message: session.pinned ? '已取消固定' : '已固定，将跳过自动归档',
+      });
+    } catch (error) {
+      showCommandError('更新固定状态', error);
+    } finally {
+      setChangingSessionId('');
+      focusSessionMenuTrigger(session.id);
+    }
+  }
+
+  async function toggleSessionArchived(session: ManagedSession) {
+    if (changingSessionId) return;
+    const archiving = session.archivedAt === null;
+    closeSessionMenu();
+    setChangingSessionId(session.id);
+    try {
+      await runCommand({
+        type: 'bok/set-session-archived',
+        sessionId: session.id,
+        archived: archiving,
+      });
+      setActionNotice({
+        type: 'success',
+        message: archiving
+          ? session.pinned ? '已取消固定并归档' : '已归档'
+          : '已恢复到当前视图',
+      });
+    } catch (error) {
+      showCommandError(archiving ? '归档保存记录' : '恢复保存记录', error);
+    } finally {
+      setChangingSessionId('');
+      focusSessionMenuTrigger(session.id);
+    }
+  }
+
+  async function toggleSessionLocked(session: ManagedSession) {
+    if (changingSessionId) return;
+    closeSessionMenu();
+    setChangingSessionId(session.id);
+    try {
+      await runCommand({
+        type: 'bok/set-session-locked',
+        sessionId: session.id,
+        locked: !session.locked,
+      });
+      setActionNotice({
+        type: 'success',
+        message: session.locked
+          ? '保存记录已解锁'
+          : '保存记录已锁定，删除记录和独立标签已禁用',
+      });
+    } catch (error) {
+      showCommandError(session.locked ? '解锁保存记录' : '锁定保存记录', error);
+    } finally {
+      setChangingSessionId('');
+      focusSessionMenuTrigger(session.id);
+    }
+  }
+
+  async function setSessionTaskStatus(
+    session: ManagedSession,
+    status: TaskStatus | null,
+  ) {
+    if (changingSessionId) return;
+    closeSessionMenu();
+    setChangingSessionId(session.id);
+    try {
+      await runCommand({
+        type: 'bok/set-session-task-status',
+        sessionId: session.id,
+        status,
+      });
+      setActionNotice({
+        type: 'success',
+        message: status === null
+          ? '已取消任务标记'
+          : `已标记为 ${TASK_STATUS_LABELS[status]}`,
+      });
+    } catch (error) {
+      showCommandError('更新任务状态', error);
+    } finally {
+      setChangingSessionId('');
+      focusSessionMenuTrigger(session.id);
+    }
+  }
+
+  async function deleteSession(session: ManagedSession) {
+    closeSessionMenu();
+    if (session.locked) {
+      setActionNotice({ type: 'error', message: '保存记录已锁定，无法删除。' });
+      focusSessionMenuTrigger(session.id);
+      return;
+    }
+    if (hasLockedGroup(session)) {
+      setActionNotice({
+        type: 'error',
+        message: '保存记录中有已锁定标签组，请先解锁后再删除。',
+      });
+      focusSessionMenuTrigger(session.id);
+      return;
+    }
+    const title = getSessionTitle(session);
+    if (
+      !window.confirm(
+        `永久删除保存记录“${title}”及其中 ${session.totalTabCount} 个标签？此操作无法恢复。`,
+      )
+    ) {
+      focusSessionMenuTrigger(session.id);
+      return;
+    }
+
+    setChangingSessionId(session.id);
+    try {
+      await runCommand({ type: 'bok/remove-session', sessionId: session.id });
+      setActionNotice({ type: 'success', message: `已删除保存记录“${title}”` });
+      requestAnimationFrame(() => document.getElementById('saved-groups')?.focus());
+    } catch (error) {
+      showCommandError('删除保存记录', error);
+      focusSessionMenuTrigger(session.id);
+    } finally {
+      setChangingSessionId('');
+    }
+  }
+
   function toggleTheme() {
     const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
     setTheme(nextTheme);
+    void browser.storage.local
+      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
+      .then(() =>
+        browser.runtime.sendMessage({
+          type: 'bok/bookmark-backup',
+          force: true,
+        }),
+      )
+      .catch(() => undefined);
   }
 
   async function openBookmarkManager() {
@@ -1032,8 +1600,10 @@ export default function BokPage() {
     options: OpenGroupOptions,
     restoreMenuFocus = false,
   ) {
-    if (openingGroupId) return;
+    if (openingCommandRef.current || openingGroupId || openingSessionId) return;
+    openingCommandRef.current = true;
 
+    closeSessionMenu();
     closeGroupMenu(restoreMenuFocus);
     setOpeningGroupId(group.id);
 
@@ -1074,9 +1644,335 @@ export default function BokPage() {
     } catch (error) {
       showCommandError('打开分组', error);
     } finally {
+      openingCommandRef.current = false;
       setOpeningGroupId('');
       if (restoreMenuFocus) focusMenuTrigger(group.id);
     }
+  }
+
+  function renderTabRow(
+    tab: SavedTab,
+    location: {
+      sessionId: string;
+      groupId: string;
+      locked: boolean;
+      lockOwner?: '组' | '保存记录';
+      directItem?: Extract<ManagedSessionItem, { type: 'tab' }>;
+    },
+  ) {
+    const Row = location.directItem ? 'div' : 'li';
+    const lockOwner = location.lockOwner ?? '组';
+    return (
+      <Row
+        key={tab.id}
+        className={`tab-row${tab.taskStatus ? ' tab-row--task' : ''}`}
+        data-task-status={tab.taskStatus ?? undefined}
+      >
+        <a
+          className="tab-row__link"
+          href={tab.url}
+          target="_blank"
+          rel="noreferrer"
+          aria-label={`在新标签页打开链接：${tab.title}`}
+          onClick={(event) => openChromeUrl(event, tab.url)}
+        />
+        <Favicon tab={tab} />
+        <span className="tab-actions">
+          <button
+            type="button"
+            className="tab-action tab-action--delete"
+            aria-label={
+              location.locked
+                ? `${lockOwner}已锁定，先解锁后才能删除：${tab.title}`
+                : `删除：${tab.title}`
+            }
+            disabled={location.locked}
+            title={location.locked ? `${lockOwner}已锁定，先解锁后才能删除标签` : '删除'}
+            onClick={() =>
+              location.directItem
+                ? void deleteDirectTab(location.directItem)
+                : void deleteTab(location.groupId, tab.id)
+            }
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
+            </svg>
+          </button>
+          {tab.taskStatus === null && (
+            <button
+              type="button"
+              className="tab-action tab-action--task"
+              aria-label={`标记为任务：${tab.title}`}
+              title="标记为任务（Doing）"
+              disabled={changingTabId === tab.id}
+              ref={(element) => {
+                if (element) tabTaskButtonRefs.current.set(tab.id, element);
+                else tabTaskButtonRefs.current.delete(tab.id);
+              }}
+              onClick={() =>
+                void setTabTaskStatus(
+                  location.sessionId,
+                  location.groupId,
+                  tab,
+                  'doing',
+                )
+              }
+            >
+              <TaskIcon status="doing" />
+            </button>
+          )}
+        </span>
+        <span className="tab-title">
+          <span className="tab-title__text">{tab.title}</span>
+          {tab.taskStatus && (
+            <label className="tab-task-status">
+              <span className="sr-only">任务状态</span>
+              <TaskIcon status={tab.taskStatus} />
+              <select
+                value={tab.taskStatus}
+                disabled={changingTabId === tab.id}
+                aria-label={`任务状态：${tab.title}`}
+                ref={(element) => {
+                  if (element) tabTaskStatusRefs.current.set(tab.id, element);
+                  else tabTaskStatusRefs.current.delete(tab.id);
+                }}
+                onChange={(event) =>
+                  void setTabTaskStatus(
+                    location.sessionId,
+                    location.groupId,
+                    tab,
+                    (event.target.value || null) as TaskStatus | null,
+                  )
+                }
+              >
+                <option value="todo">Todo</option>
+                <option value="doing">Doing</option>
+                <option value="done">Done</option>
+                <option value="">取消任务</option>
+              </select>
+            </label>
+          )}
+        </span>
+        <span className="tab-url">{getDisplayUrl(tab.url)}</span>
+      </Row>
+    );
+  }
+
+  function renderSessionHeader(
+    session: ManagedSession,
+    collapsed: boolean,
+    createdAt: string,
+  ) {
+    const title = getSessionTitle(session);
+    const changing = changingSessionId === session.id;
+    const opening = openingSessionId === session.id;
+    const archived = session.archivedAt !== null;
+    const lockedGroup = hasLockedGroup(session);
+    const deleteBlocked = session.locked || lockedGroup;
+    const deleteBlockedMessage = session.locked
+      ? '保存记录已锁定，无法删除'
+      : '保存记录中有已锁定标签组，请先解锁后再删除';
+
+    return (
+      <header className="saved-session__header">
+        <div className="saved-session__summary">
+          <h2 id={`session-title-${session.id}`}>
+            {editingSessionId === session.id ? (
+              <input
+                className="session-title__input"
+                value={sessionTitleDraft}
+                aria-label={`编辑 ${title} 的名称`}
+                autoFocus
+                onChange={(event) => setSessionTitleDraft(event.target.value)}
+                onBlur={() => void saveSessionTitle(session)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void saveSessionTitle(session);
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    cancelSessionTitleEdit(session.id);
+                  }
+                }}
+              />
+            ) : (
+              <button
+                type="button"
+                className="session-title__button"
+                aria-describedby={`session-title-hint-${session.id}`}
+                title="点击编辑名称"
+                ref={(element) => {
+                  if (element) sessionTitleButtonRefs.current.set(session.id, element);
+                  else sessionTitleButtonRefs.current.delete(session.id);
+                }}
+                onClick={() => startEditingSession(session)}
+              >
+                {title}
+              </button>
+            )}
+          </h2>
+          {editingSessionId !== session.id && (
+            <span id={`session-title-hint-${session.id}`} className="sr-only">
+              点击重命名保存记录
+            </span>
+          )}
+          <div className="saved-session__meta">
+            <time dateTime={new Date(session.createdAt).toISOString()}>{createdAt}</time>
+            {session.title.trim() && <span>{session.totalTabCount} 个标签</span>}
+            {session.pinned && <span>已固定</span>}
+            {archived && <span>已归档</span>}
+            {session.locked && <span>已锁定</span>}
+            {session.taskStatus && <TaskBadge status={session.taskStatus} />}
+          </div>
+        </div>
+
+        <div className="saved-session__actions">
+          <button
+            type="button"
+            className="group-open-button session-open-button"
+            disabled={Boolean(openingSessionId) || Boolean(openingGroupId) || changing}
+            onClick={() => void openSession(session, 'current-window')}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M5 4.5h10v11H5zM8 8h4M10 6v4" />
+            </svg>
+            <span>{opening ? '打开中…' : '打开全部'}</span>
+          </button>
+
+          <div className="group-more session-more" data-session-id={session.id}>
+            <button
+              type="button"
+              className="group-more__trigger"
+              aria-label={`更多操作：${title}`}
+              aria-haspopup="menu"
+              aria-expanded={openMenuSessionId === session.id}
+              disabled={Boolean(openingSessionId) || Boolean(openingGroupId) || changing}
+              ref={(element) => {
+                if (element) sessionMenuTriggerRefs.current.set(session.id, element);
+                else sessionMenuTriggerRefs.current.delete(session.id);
+              }}
+              onClick={() => {
+                if (openMenuSessionId === session.id) closeSessionMenu();
+                else openSessionMenu(session.id);
+              }}
+              onKeyDown={(event) => handleSessionMenuTriggerKeyDown(event, session.id)}
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true">
+                <circle cx="5" cy="10" r="1" />
+                <circle cx="10" cy="10" r="1" />
+                <circle cx="15" cy="10" r="1" />
+              </svg>
+            </button>
+
+            {openMenuSessionId === session.id && (
+              <div
+                className="group-menu session-menu"
+                role="menu"
+                aria-label={`${title} 的更多操作`}
+                onKeyDown={(event) => handleSessionMenuKeyDown(event, session.id)}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={Boolean(openingGroupId)}
+                  ref={(element) => setSessionMenuItemRef(session.id, 0, element)}
+                  onClick={() => void openSession(session, 'new-window', true)}
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <rect x="3.5" y="5" width="5" height="10" rx="1" />
+                    <rect x="11.5" y="5" width="5" height="10" rx="1" />
+                  </svg>
+                  在新窗口打开
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={archived}
+                  title={archived ? '归档中的保存记录不能固定' : undefined}
+                  ref={(element) => setSessionMenuItemRef(session.id, 1, element)}
+                  onClick={() => void toggleSessionPinned(session)}
+                >
+                  <PinIcon />
+                  {session.pinned ? '取消固定' : '固定保存记录'}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  ref={(element) => setSessionMenuItemRef(session.id, 2, element)}
+                  onClick={() => void toggleSessionArchived(session)}
+                >
+                  <ArchiveIcon restore={archived} />
+                  {archived ? '恢复到当前视图' : '归档保存记录'}
+                </button>
+                <div className="group-menu__separator" role="separator" />
+                {(['todo', 'doing', 'done'] as const).map((status, index) => (
+                  <button
+                    key={status}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={session.taskStatus === status}
+                    ref={(element) => setSessionMenuItemRef(session.id, 3 + index, element)}
+                    onClick={() => void setSessionTaskStatus(session, status)}
+                  >
+                    <TaskIcon status={status} />
+                    标记为 {TASK_STATUS_LABELS[status]}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={session.taskStatus === null}
+                  ref={(element) => setSessionMenuItemRef(session.id, 6, element)}
+                  onClick={() => void setSessionTaskStatus(session, null)}
+                >
+                  <TaskOffIcon />
+                  取消任务标记
+                </button>
+                <div className="group-menu__separator" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  ref={(element) => setSessionMenuItemRef(session.id, 7, element)}
+                  onClick={() => void toggleSessionLocked(session)}
+                >
+                  <LockIcon open={session.locked} />
+                  {session.locked ? '解锁保存记录' : '锁定保存记录'}
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="group-menu__danger"
+                  disabled={deleteBlocked}
+                  title={deleteBlocked ? deleteBlockedMessage : undefined}
+                  ref={(element) => setSessionMenuItemRef(session.id, 8, element)}
+                  onClick={() => void deleteSession(session)}
+                >
+                  <svg viewBox="0 0 20 20" aria-hidden="true">
+                    <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
+                  </svg>
+                  {deleteBlocked ? '删除（有锁定内容，先解锁）' : '删除保存记录'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className="collapse-button session-collapse-button"
+            aria-expanded={!collapsed}
+            aria-controls={`session-items-${session.id}`}
+            disabled={filtersActive}
+            title={filtersActive ? '筛选期间保持展开' : undefined}
+            onClick={() => toggleSession(session.id)}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="m6.5 8 3.5 3.5L13.5 8" />
+            </svg>
+            <span className="sr-only">{collapsed ? '展开' : '收起'} {title}</span>
+          </button>
+        </div>
+      </header>
+    );
   }
 
   return (
@@ -1198,9 +2094,9 @@ export default function BokPage() {
                         ) : filter.value === 'doing' ? (
                           <span
                             className="sidebar__count sidebar__count--task"
-                            aria-label={`Doing 中：${doingCount.groups} 个分组，${doingCount.tabs} 个标签`}
+                            aria-label={`Doing 中：${doingCount.sessions} 个保存记录，${doingCount.groups} 个分组，${doingCount.tabs} 个标签`}
                           >
-                            {doingCount.groups} 组 · {doingCount.tabs} 标签
+                            {doingCount.sessions} 记录 · {doingCount.groups} 组 · {doingCount.tabs} 标签
                           </span>
                         ) : null}
                       </button>
@@ -1210,44 +2106,45 @@ export default function BokPage() {
               </ul>
             </div>
 
-            <div className="sidebar__section sidebar__section--groups">
-              <h2>分组</h2>
-              {visibleGroups.length > 0 && (
+            <div className="sidebar__section sidebar__section--sessions">
+              <h2>保存记录</h2>
+              {visibleSessions.length > 0 && (
                 <label className="group-select">
-                  <span className="sr-only">跳转到分组</span>
+                  <span className="sr-only">跳转到保存记录</span>
                   <select
-                    value={activeGroupId}
-                    onChange={(event) => goToGroup(event.target.value)}
+                    value={activeSessionId}
+                    onChange={(event) => goToSession(event.target.value)}
                   >
-                    {visibleGroups.map((group, index) => (
-                      <option key={group.id} value={group.id}>
-                        {index + 1}. {getGroupTitle(group)}
-                      </option>
-                    ))}
+                    {visibleSessions.map((session, index) => {
+                      const fullSession = sessionsById.get(session.id) ?? session;
+                      return (
+                        <option key={session.id} value={session.id}>
+                          {index + 1}. {getSessionNavigationTitle(fullSession)}
+                        </option>
+                      );
+                    })}
                   </select>
                 </label>
               )}
-              <ol className="group-nav">
-                {visibleGroups.map((group, index) => (
-                  <li key={group.id}>
-                    <button
-                      type="button"
-                      aria-current={activeGroupId === group.id ? 'location' : undefined}
-                      title={getGroupTitle(group)}
-                      onClick={() => goToGroup(group.id)}
-                    >
-                      <span className="group-nav__index">{index + 1}</span>
-                      {group.pinned && (
-                        <span className="group-nav__pin" aria-label="已固定">
-                          <PinIcon />
+              <ol className="group-nav session-nav">
+                {visibleSessions.map((session, index) => {
+                  const fullSession = sessionsById.get(session.id) ?? session;
+                  return (
+                    <li key={session.id}>
+                      <button
+                        type="button"
+                        aria-current={activeSessionId === session.id ? 'location' : undefined}
+                        title={`${getSessionNavigationTitle(fullSession)}，共 ${fullSession.totalTabCount} 个标签，保存于 ${formatGroupCreatedAt(fullSession.createdAt)}`}
+                        onClick={() => goToSession(session.id)}
+                      >
+                        <span className="group-nav__index">{index + 1}</span>
+                        <span className="group-nav__title">
+                          {getSessionNavigationTitle(fullSession)}
                         </span>
-                      )}
-                      {group.grouped && <BrowserGroupIcon />}
-                      <span className="group-nav__title">{getGroupTitle(group)}</span>
-                      <span className="sidebar__count">{group.tabs.length}</span>
-                    </button>
-                  </li>
-                ))}
+                      </button>
+                    </li>
+                  );
+                })}
               </ol>
             </div>
           </nav>
@@ -1258,7 +2155,7 @@ export default function BokPage() {
             <div>
               <h1>{getContentTitle(archiveView, taskFilter)}</h1>
             </div>
-            <span>{visibleGroups.length} 个分组</span>
+            <span>{visibleSessions.length} 个记录 · {visibleTabCount} 个标签</span>
           </header>
 
           {loadError ? (
@@ -1273,18 +2170,18 @@ export default function BokPage() {
             <section className="empty-state" role="status">
               <h2>正在读取保存记录</h2>
             </section>
-          ) : groups.length === 0 ? (
+          ) : sessions.length === 0 ? (
             <section className="empty-state">
               <h2>还没有保存记录</h2>
               <p>点击 Bok 插件图标保存并关闭当前窗口的全部标签后，它们会显示在这里。</p>
             </section>
-          ) : viewGroups.length === 0 ? (
+          ) : viewSessions.length === 0 ? (
             <section className="empty-state">
               <h2>{archiveView === 'archived' ? '还没有归档记录' : '当前视图为空'}</h2>
               <p>
                 {archiveView === 'archived'
-                  ? '归档分组后，可以在这里打开或恢复。'
-                  : '所有分组都已归档，可以切换到归档视图查看。'}
+                  ? '归档内容会保留在原保存记录中，可以在这里打开或恢复。'
+                  : '所有内容都已归档，可以切换到归档视图查看。'}
               </p>
               <button
                 type="button"
@@ -1295,7 +2192,7 @@ export default function BokPage() {
                 {archiveView === 'archived' ? '返回当前视图' : '查看归档'}
               </button>
             </section>
-          ) : visibleGroups.length === 0 ? (
+          ) : visibleSessions.length === 0 ? (
             <section className="empty-state">
               <h2>没有匹配的标签</h2>
               <p>调整搜索关键词、任务状态或切换视图。</p>
@@ -1310,26 +2207,89 @@ export default function BokPage() {
               </button>
             </section>
           ) : (
-            <div className="group-list">
-              {visibleGroups.map((group) => {
-                const collapsed = collapsedGroupIds.has(group.id);
+            <div className="session-list">
+              {visibleSessions.map((session) => {
+                const fullSession = sessionsById.get(session.id) ?? session;
+                const mergedBrowserGroup = getMergedBrowserGroup(fullSession);
+                const mergedGroupId = mergedBrowserGroup?.id ?? '';
+                const sessionCollapsed =
+                  !filtersActive && collapsedSessionIds.has(session.id);
+                const sessionCreatedAt = formatGroupCreatedAt(fullSession.createdAt);
+
+                return (
+                  <section
+                    key={session.id}
+                    id={`session-${session.id}`}
+                    className={`saved-session${
+                      mergedGroupId ? ' saved-session--merged' : ''
+                    }${
+                      fullSession.taskStatus ? ' saved-session--task' : ''
+                    }${
+                      fullSession.archivedAt !== null ? ' saved-session--archived' : ''
+                    }`}
+                    data-collapsed={sessionCollapsed || undefined}
+                    data-task-status={fullSession.taskStatus ?? undefined}
+                    aria-labelledby={
+                      mergedGroupId
+                        ? `group-title-${mergedGroupId}`
+                        : `session-title-${session.id}`
+                    }
+                  >
+                    {!mergedGroupId &&
+                      renderSessionHeader(fullSession, sessionCollapsed, sessionCreatedAt)}
+                    {(Boolean(mergedGroupId) || !sessionCollapsed) && (
+                      <div
+                        id={mergedGroupId ? undefined : `session-items-${session.id}`}
+                        className={`saved-session__items${
+                          mergedGroupId ? ' saved-session__items--merged' : ''
+                        }`}
+                      >
+              {session.items.map((item) => {
+                if (item.type === 'tab') {
+                  return (
+                    <div
+                      key={`tab:${item.tab.id}`}
+                      className={`session-item session-direct-tab${
+                        fullSession.archivedAt !== null || item.tab.archivedAt !== null
+                          ? ' session-direct-tab--archived'
+                          : ''
+                      }`}
+                    >
+                      {renderTabRow(item.tab, {
+                        sessionId: item.sessionId,
+                        groupId: item.groupId,
+                        locked: fullSession.locked,
+                        lockOwner: '保存记录',
+                        directItem: item,
+                      })}
+                    </div>
+                  );
+                }
+                const group = item.group;
+                const originalGroup = fullSession.items.find(
+                  (candidate): candidate is Extract<ManagedSessionItem, { type: 'group' }> =>
+                    candidate.type === 'group' && candidate.group.id === group.id,
+                )?.group;
+                const isMergedGroup = group.id === mergedGroupId;
+                const collapsed = isMergedGroup
+                  ? sessionCollapsed
+                  : !filtersActive && collapsedGroupIds.has(group.id);
+                const GroupHeading = isMergedGroup ? 'h2' : 'h3';
                 const title = getGroupTitle(group);
                 const isTaskGroup = group.taskStatus !== null;
-                const grouped = group.grouped;
-                const openMenuItemCount = grouped ? 2 : 4;
-                const convertMenuIndex = openMenuItemCount;
-                const deduplicateMenuIndex =
-                  convertMenuIndex + (grouped ? 0 : 1);
+                const deduplicateMenuIndex = 2;
                 const lockMenuIndex = deduplicateMenuIndex + 1;
                 const taskMenuStartIndex = lockMenuIndex + 1;
                 const defaultOpenOptions: OpenGroupOptions = {
-                  mode: grouped ? 'tab-group' : 'tabs',
+                  mode: 'tab-group',
                   destination: 'current-window',
                 };
-                const defaultOpenTitle = grouped
-                  ? '以浏览器标签组形式打开全部标签'
-                  : '在此窗口打开全部标签';
+                const defaultOpenTitle = '以浏览器标签组形式打开全部标签';
                 const groupChanging = changingGroupId === group.id;
+                const displayedCreatedAt = isMergedGroup
+                  ? fullSession.createdAt
+                  : group.createdAt;
+                const displayedTabCount = originalGroup?.tabs.length ?? group.tabs.length;
                 const archiveActionLabel =
                   group.archivedAt !== null
                     ? '恢复到当前视图'
@@ -1341,45 +2301,49 @@ export default function BokPage() {
                   <section
                     key={group.id}
                     id={`group-${group.id}`}
-                    className={`tab-group${
+                    className={`session-item tab-group${
+                      isMergedGroup ? ' tab-group--merged' : ''
+                    } tab-group--browser${
                       isTaskGroup ? ' tab-group--task' : ''
-                    }${group.archivedAt !== null ? ' tab-group--archived' : ''}`}
+                    }${
+                      fullSession.archivedAt !== null || group.archivedAt !== null
+                        ? ' tab-group--archived'
+                        : ''
+                    }`}
                     data-task-status={group.taskStatus ?? undefined}
+                    data-group-color={group.color ?? 'grey'}
                     aria-labelledby={`group-title-${group.id}`}
                   >
                     <header className="tab-group__header">
-                      {grouped && (
-                        <span
-                          className="tab-group__kind"
-                          role="img"
-                          aria-label="浏览器标签组"
-                          title="浏览器标签组"
-                        >
-                          <BrowserGroupIcon />
-                        </span>
-                      )}
+                      <span
+                        className="tab-group__kind"
+                        role="img"
+                        aria-label="浏览器标签组"
+                        title="浏览器标签组"
+                      >
+                        <BrowserGroupIcon />
+                      </span>
                       <div className="tab-group__title">
-                        {editingGroupId === group.id ? (
-                          <input
-                            id={`group-title-${group.id}`}
-                            className="group-title__input"
-                            value={groupTitleDraft}
-                            aria-label={`编辑 ${title} 的名称`}
-                            autoFocus
-                            onChange={(event) => setGroupTitleDraft(event.target.value)}
-                            onBlur={() => void saveGroupTitle(group)}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter') {
-                                event.preventDefault();
-                                void saveGroupTitle(group);
-                              } else if (event.key === 'Escape') {
-                                event.preventDefault();
-                                cancelGroupTitleEdit(group.id);
-                              }
-                            }}
-                          />
-                        ) : (
-                          <h2 id={`group-title-${group.id}`}>
+                        <GroupHeading id={`group-title-${group.id}`}>
+                          {editingGroupId === group.id ? (
+                            <input
+                              className="group-title__input"
+                              value={groupTitleDraft}
+                              aria-label={`编辑 ${title} 的名称`}
+                              autoFocus
+                              onChange={(event) => setGroupTitleDraft(event.target.value)}
+                              onBlur={() => void saveGroupTitle(group)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                  event.preventDefault();
+                                  void saveGroupTitle(group);
+                                } else if (event.key === 'Escape') {
+                                  event.preventDefault();
+                                  cancelGroupTitleEdit(group.id);
+                                }
+                              }}
+                            />
+                          ) : (
                             <button
                               type="button"
                               className="group-title__button"
@@ -1393,8 +2357,8 @@ export default function BokPage() {
                             >
                               {title}
                             </button>
-                          </h2>
-                        )}
+                          )}
+                        </GroupHeading>
                         {editingGroupId !== group.id && (
                           <span id={`group-title-hint-${group.id}`} className="sr-only">
                             点击重命名分组
@@ -1402,12 +2366,12 @@ export default function BokPage() {
                         )}
                         <time
                           className="group-created-at"
-                          dateTime={new Date(group.createdAt).toISOString()}
-                          title={`创建于 ${formatGroupCreatedAt(group.createdAt)}`}
+                          dateTime={new Date(displayedCreatedAt).toISOString()}
+                          title={`创建于 ${formatGroupCreatedAt(displayedCreatedAt)}`}
                         >
-                          {formatGroupCreatedAt(group.createdAt)}
+                          {formatGroupCreatedAt(displayedCreatedAt)}
                         </time>
-                        {group.title.trim() && <span>{group.tabs.length} 个标签</span>}
+                        {group.title.trim() && <span>{displayedTabCount} 个标签</span>}
                         {group.locked && <span>已锁定</span>}
                         {group.taskStatus && <TaskBadge status={group.taskStatus} />}
                       </div>
@@ -1417,9 +2381,9 @@ export default function BokPage() {
                           <button
                             type="button"
                             className={`group-state-button${group.pinned ? ' group-state-button--active' : ''}`}
-                            aria-label={group.pinned ? `取消固定：${title}` : `固定到顶部：${title}`}
+                            aria-label={group.pinned ? `取消固定：${title}` : `固定：${title}`}
                             aria-pressed={group.pinned}
-                            title={group.pinned ? '取消固定' : '固定到顶部'}
+                            title={group.pinned ? '取消固定' : '固定（跳过自动归档）'}
                             disabled={Boolean(changingGroupId)}
                             onClick={() => void togglePinned(group)}
                           >
@@ -1430,17 +2394,15 @@ export default function BokPage() {
                         <button
                           type="button"
                           className="group-open-button"
-                          disabled={Boolean(openingGroupId) || groupChanging}
+                          disabled={
+                            Boolean(openingGroupId) ||
+                            Boolean(openingSessionId) ||
+                            groupChanging
+                          }
                           title={defaultOpenTitle}
                           onClick={() => void openGroup(group, defaultOpenOptions)}
                         >
-                          {grouped ? (
-                            <BrowserGroupIcon />
-                          ) : (
-                            <svg viewBox="0 0 20 20" aria-hidden="true">
-                              <path d="M5 4.5h10v11H5zM8 8h4M10 6v4" />
-                            </svg>
-                          )}
+                          <BrowserGroupIcon />
                           <span>{openingGroupId === group.id ? '打开中…' : '打开全部'}</span>
                         </button>
 
@@ -1514,7 +2476,11 @@ export default function BokPage() {
                             aria-label={`更多操作：${title}`}
                             aria-haspopup="menu"
                             aria-expanded={openMenuGroupId === group.id}
-                            disabled={Boolean(openingGroupId) || groupChanging}
+                            disabled={
+                              Boolean(openingGroupId) ||
+                              Boolean(openingSessionId) ||
+                              groupChanging
+                            }
                             ref={(element) => {
                               if (element) menuTriggerRefs.current.set(group.id, element);
                               else menuTriggerRefs.current.delete(group.id);
@@ -1539,35 +2505,10 @@ export default function BokPage() {
                               aria-label={`${title} 的更多操作`}
                               onKeyDown={(event) => handleMenuKeyDown(event, group.id)}
                             >
-                              {!grouped && (
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  ref={(element) => setMenuItemRef(group.id, 0, element)}
-                                  onClick={() =>
-                                    void openGroup(
-                                      group,
-                                      {
-                                        mode: 'tabs',
-                                        destination: 'current-window',
-                                      },
-                                      true,
-                                    )
-                                  }
-                                >
-                                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                                    <rect x="3.5" y="4" width="13" height="12" rx="1.5" />
-                                    <path d="M3.5 7h13" />
-                                  </svg>
-                                  在此窗口打开
-                                </button>
-                              )}
                               <button
                                 type="button"
                                 role="menuitem"
-                                ref={(element) =>
-                                  setMenuItemRef(group.id, grouped ? 0 : 1, element)
-                                }
+                                ref={(element) => setMenuItemRef(group.id, 0, element)}
                                 onClick={() =>
                                   void openGroup(
                                     group,
@@ -1584,35 +2525,10 @@ export default function BokPage() {
                                 </svg>
                                 在此窗口以标签组打开
                               </button>
-                              {!grouped && (
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  ref={(element) => setMenuItemRef(group.id, 2, element)}
-                                  onClick={() =>
-                                    void openGroup(
-                                      group,
-                                      {
-                                        mode: 'tabs',
-                                        destination: 'new-window',
-                                      },
-                                      true,
-                                    )
-                                  }
-                                >
-                                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                                    <rect x="3.5" y="5" width="5" height="10" rx="1" />
-                                    <rect x="11.5" y="5" width="5" height="10" rx="1" />
-                                  </svg>
-                                  在新窗口打开
-                                </button>
-                              )}
                               <button
                                 type="button"
                                 role="menuitem"
-                                ref={(element) =>
-                                  setMenuItemRef(group.id, grouped ? 1 : 3, element)
-                                }
+                                ref={(element) => setMenuItemRef(group.id, 1, element)}
                                 onClick={() =>
                                   void openGroup(
                                     group,
@@ -1631,22 +2547,6 @@ export default function BokPage() {
                                 在新窗口以标签组打开
                               </button>
                               <div className="group-menu__separator" role="separator" />
-                              {!grouped && (
-                                <>
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    ref={(element) =>
-                                      setMenuItemRef(group.id, convertMenuIndex, element)
-                                    }
-                                    onClick={() => void convertGroup(group)}
-                                  >
-                                    <BrowserGroupIcon />
-                                    转换为标签组
-                                  </button>
-                                  <div className="group-menu__separator" role="separator" />
-                                </>
-                              )}
                               <button
                                 type="button"
                                 role="menuitem"
@@ -1712,7 +2612,13 @@ export default function BokPage() {
                           className="collapse-button"
                           aria-expanded={!collapsed}
                           aria-controls={`group-tabs-${group.id}`}
-                          onClick={() => toggleGroup(group.id)}
+                          disabled={filtersActive}
+                          title={filtersActive ? '筛选期间保持展开' : undefined}
+                          onClick={() =>
+                            isMergedGroup
+                              ? toggleSession(session.id)
+                              : toggleGroup(group.id)
+                          }
                         >
                           <svg viewBox="0 0 20 20" aria-hidden="true">
                             <path d="m6.5 8 3.5 3.5L13.5 8" />
@@ -1724,89 +2630,19 @@ export default function BokPage() {
 
                     {!collapsed && (
                       <ol id={`group-tabs-${group.id}`} className="tab-list">
-                        {group.tabs.map((tab) => (
-                          <li
-                            key={tab.id}
-                            className={`tab-row${tab.taskStatus ? ' tab-row--task' : ''}`}
-                            data-task-status={tab.taskStatus ?? undefined}
-                          >
-                              <a
-                                className="tab-row__link"
-                                href={tab.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label={`在新标签页打开链接：${tab.title}`}
-                                onClick={(event) => openChromeUrl(event, tab.url)}
-                              />
-                              <Favicon tab={tab} />
-                              <span className="tab-actions">
-                                <button
-                                  type="button"
-                                  className="tab-action tab-action--delete"
-                                  aria-label={
-                                    group.locked
-                                      ? `组已锁定，先解锁后才能删除：${tab.title}`
-                                      : `删除：${tab.title}`
-                                  }
-                                  disabled={group.locked}
-                                  title={group.locked ? '组已锁定，先解锁后才能删除标签' : '删除'}
-                                  onClick={() => void deleteTab(group.id, tab.id)}
-                                >
-                                  <svg viewBox="0 0 20 20" aria-hidden="true">
-                                    <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
-                                  </svg>
-                                </button>
-                                {tab.taskStatus === null && (
-                                  <button
-                                    type="button"
-                                    className="tab-action tab-action--task"
-                                    aria-label={`标记为任务：${tab.title}`}
-                                    title="标记为任务（Doing）"
-                                    disabled={changingTabId === tab.id}
-                                    ref={(element) => {
-                                      if (element) tabTaskButtonRefs.current.set(tab.id, element);
-                                      else tabTaskButtonRefs.current.delete(tab.id);
-                                    }}
-                                    onClick={() => void setTabTaskStatus(group, tab, 'doing')}
-                                  >
-                                    <TaskIcon status="doing" />
-                                  </button>
-                                )}
-                              </span>
-                              <span className="tab-title">
-                                <span className="tab-title__text">{tab.title}</span>
-                                {tab.taskStatus && (
-                                  <label className="tab-task-status">
-                                    <span className="sr-only">任务状态</span>
-                                    <TaskIcon status={tab.taskStatus} />
-                                    <select
-                                      value={tab.taskStatus}
-                                      disabled={changingTabId === tab.id}
-                                      aria-label={`任务状态：${tab.title}`}
-                                      ref={(element) => {
-                                        if (element) tabTaskStatusRefs.current.set(tab.id, element);
-                                        else tabTaskStatusRefs.current.delete(tab.id);
-                                      }}
-                                      onChange={(event) =>
-                                        void setTabTaskStatus(
-                                          group,
-                                          tab,
-                                          (event.target.value || null) as TaskStatus | null,
-                                        )
-                                      }
-                                    >
-                                      <option value="todo">Todo</option>
-                                      <option value="doing">Doing</option>
-                                      <option value="done">Done</option>
-                                      <option value="">取消任务</option>
-                                    </select>
-                                  </label>
-                                )}
-                              </span>
-                              <span className="tab-url">{getDisplayUrl(tab.url)}</span>
-                          </li>
-                        ))}
+                        {group.tabs.map((tab) =>
+                          renderTabRow(tab, {
+                            sessionId: group.sessionId,
+                            groupId: group.id,
+                            locked: group.locked,
+                          }),
+                        )}
                       </ol>
+                    )}
+                  </section>
+                );
+              })}
+                      </div>
                     )}
                   </section>
                 );

@@ -110,7 +110,6 @@ async function mergeAndBindRecoveredGroup(
   browserGroupId: number,
 ): Promise<TaskGroupBinding | null> {
   const savedGroup = await getSavedGroup(sessionId, savedGroupId);
-  if (!savedGroup.grouped) return null;
 
   const browserGroup = await browser.tabGroups.get(browserGroupId);
   const browserTabs = (await browser.tabs.query({ groupId: browserGroupId })).sort(
@@ -224,6 +223,34 @@ function reverseTabMap(
   );
 }
 
+export interface OpenedTaskGroupBinding {
+  savedGroupId: string;
+  browserGroupId: number;
+  windowId: number;
+  openedTabIdBySavedTabId: Record<string, number>;
+}
+
+export async function bindOpenedTaskGroups(
+  sessionId: string,
+  openedGroups: OpenedTaskGroupBinding[],
+): Promise<void> {
+  if (openedGroups.length === 0) return;
+  const bindings = await getBindings();
+  for (const opened of openedGroups) {
+    bindings[bindingKey(sessionId, opened.savedGroupId)] = {
+      sessionId,
+      savedGroupId: opened.savedGroupId,
+      browserGroupId: opened.browserGroupId,
+      windowId: opened.windowId,
+      savedTabIdByBrowserTabId: reverseTabMap(
+        opened.openedTabIdBySavedTabId,
+      ),
+      ignoredBrowserTabIds: [],
+    };
+  }
+  await setBindings(bindings);
+}
+
 export async function bindOpenedTaskGroup(
   sessionId: string,
   savedGroupId: string,
@@ -231,16 +258,14 @@ export async function bindOpenedTaskGroup(
   windowId: number,
   openedTabIdBySavedTabId: Record<string, number>,
 ): Promise<void> {
-  const bindings = await getBindings();
-  bindings[bindingKey(sessionId, savedGroupId)] = {
-    sessionId,
-    savedGroupId,
-    browserGroupId,
-    windowId,
-    savedTabIdByBrowserTabId: reverseTabMap(openedTabIdBySavedTabId),
-    ignoredBrowserTabIds: [],
-  };
-  await setBindings(bindings);
+  await bindOpenedTaskGroups(sessionId, [
+    {
+      savedGroupId,
+      browserGroupId,
+      windowId,
+      openedTabIdBySavedTabId,
+    },
+  ]);
 }
 
 export async function clearTaskGroupBinding(
@@ -252,6 +277,39 @@ export async function clearTaskGroupBinding(
   if (!(key in bindings)) return;
   delete bindings[key];
   await setBindings(bindings);
+}
+
+export async function clearTaskGroupBindingsForSession(
+  sessionId: string,
+): Promise<void> {
+  const bindings = await getBindings();
+  let changed = false;
+  for (const [key, binding] of Object.entries(bindings)) {
+    if (binding.sessionId !== sessionId) continue;
+    delete bindings[key];
+    changed = true;
+  }
+  if (changed) await setBindings(bindings);
+}
+
+export async function getActiveTaskGroupBindings(
+  sessionId: string,
+  savedGroupIds: string[],
+): Promise<Set<string>> {
+  const bindings = await getBindings();
+  const active = new Set<string>();
+  for (const savedGroupId of savedGroupIds) {
+    const key = bindingKey(sessionId, savedGroupId);
+    const binding = bindings[key];
+    if (!binding) continue;
+    try {
+      await browser.tabGroups.get(binding.browserGroupId);
+      active.add(savedGroupId);
+    } catch {
+      // Read-only preflight: stale bindings are cleaned by the normal restore path.
+    }
+  }
+  return active;
 }
 
 export async function updateBoundGroupTitle(
@@ -689,8 +747,10 @@ export async function restoreTaskGroupBindings(): Promise<void> {
   );
   const activeSyncedGroupKeys = new Set(
     sessions.flatMap((session) =>
-      session.groups.flatMap((group) =>
-        group.grouped ? [bindingKey(session.id, group.id)] : [],
+      session.items.flatMap((item) =>
+        item.type === 'group'
+          ? [bindingKey(session.id, item.group.id)]
+          : [],
       ),
     ),
   );
@@ -741,9 +801,11 @@ export async function restoreTaskGroupBindings(): Promise<void> {
     }>
   > = [];
   for (const session of sessions) {
-    for (const savedGroup of session.groups) {
+    for (const item of session.items) {
+      if (item.type !== 'group') continue;
+      const savedGroup = item.group;
       const key = bindingKey(session.id, savedGroup.id);
-      if (!savedGroup.grouped || existing.has(key)) continue;
+      if (existing.has(key)) continue;
 
       for (const candidate of candidates) {
         const { browserGroup, tabs } = candidate;
