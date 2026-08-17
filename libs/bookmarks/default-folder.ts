@@ -43,26 +43,15 @@ async function readConfiguredFolderId(): Promise<string | null> {
   return getConfiguredFolderId(stored[DEFAULT_BOOKMARK_FOLDER_ID_KEY]);
 }
 
-function findFolder(node: BookmarkNode, folderId: string): BookmarkNode | null {
-  if (node.url == null && node.id === folderId) return node;
-  for (const child of node.children ?? []) {
-    if (child.url != null) continue;
-    const match = findFolder(child, folderId);
-    if (match) return match;
-  }
-  return null;
-}
-
-function collectFolderOptions(
-  node: BookmarkNode,
-  path: string[],
-  options: DefaultBookmarkFolderOption[],
-): void {
-  options.push({ id: node.id, label: path.join(' / ') });
-  for (const child of node.children ?? []) {
-    if (child.url != null) continue;
-    collectFolderOptions(child, [...path, child.title], options);
-  }
+function findTopLevelFolder(
+  bookmarksBar: BookmarkNode,
+  folderId: string,
+): BookmarkNode | null {
+  return (
+    bookmarksBar.children?.find(
+      (node) => node.url == null && node.id === folderId,
+    ) ?? null
+  );
 }
 
 function collectMarkerIds(node: BookmarkNode, markerIds: string[]): void {
@@ -87,10 +76,11 @@ export async function getDefaultBookmarkFolderSettings(): Promise<
     readBookmarksBar(),
     readConfiguredFolderId(),
   ]);
-  const options: DefaultBookmarkFolderOption[] = [];
-  collectFolderOptions(bookmarksBar, ['书签栏'], options);
+  const options = (bookmarksBar.children ?? [])
+    .filter((node) => node.url == null)
+    .map((node) => ({ id: node.id, label: `书签栏 / ${node.title}` }));
   const configuredFolder = configuredFolderId
-    ? findFolder(bookmarksBar, configuredFolderId)
+    ? findTopLevelFolder(bookmarksBar, configuredFolderId)
     : null;
   const legacyInbox = bookmarksBar.children?.find(
     (node) => node.url == null && node.title === DEFAULT_BOOKMARK_FOLDER_TITLE,
@@ -110,8 +100,8 @@ export async function setDefaultBookmarkFolderId(
   folderId: string,
 ): Promise<void> {
   const bookmarksBar = await readBookmarksBar();
-  if (!findFolder(bookmarksBar, folderId)) {
-    throw new Error('默认书签目录已不存在，请重新选择');
+  if (!findTopLevelFolder(bookmarksBar, folderId)) {
+    throw new Error('默认书签目录必须是书签栏一级文件夹，请重新选择');
   }
   await browser.storage.local.set({
     [DEFAULT_BOOKMARK_FOLDER_ID_KEY]: folderId,
@@ -134,7 +124,7 @@ export async function markDefaultBookmarkFolderAsMostRecentlyModified(): Promise
     readConfiguredFolderId(),
   ]);
   const targetFolder = configuredFolderId
-    ? findFolder(bookmarksBar, configuredFolderId)
+    ? findTopLevelFolder(bookmarksBar, configuredFolderId)
     : bookmarksBar.children?.find(
         (node) => node.url == null && node.title === DEFAULT_BOOKMARK_FOLDER_TITLE,
       );

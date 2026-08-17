@@ -60,10 +60,8 @@ assert.deepEqual(await getDefaultBookmarkFolderSettings(), {
   selectedFolderId: '5',
   missingConfiguredFolder: false,
   options: [
-    { id: '1', label: '书签栏' },
     { id: '5', label: '书签栏 / Inbox' },
     { id: '6', label: '书签栏 / Projects' },
-    { id: '7', label: '书签栏 / Projects / Bok' },
   ],
 });
 assert.equal(await markDefaultBookmarkFolderAsMostRecentlyModified(), true);
@@ -114,17 +112,21 @@ fakeBrowser.bookmarks.getSubTree = async () => [
   },
 ];
 
-await setDefaultBookmarkFolderId('7');
+await assert.rejects(
+  setDefaultBookmarkFolderId('7'),
+  /默认书签目录必须是书签栏一级文件夹/,
+);
+await setDefaultBookmarkFolderId('6');
 assert.deepEqual(
   await fakeBrowser.storage.local.get(DEFAULT_BOOKMARK_FOLDER_ID_KEY),
-  { [DEFAULT_BOOKMARK_FOLDER_ID_KEY]: '7' },
+  { [DEFAULT_BOOKMARK_FOLDER_ID_KEY]: '6' },
 );
 createdDetails = undefined;
 removedIds.length = 0;
 
 assert.equal(await markDefaultBookmarkFolderAsMostRecentlyModified(), true);
 assert.deepEqual(createdDetails, {
-  parentId: '7',
+  parentId: '6',
   title: 'Bok Inbox marker',
   url: 'chrome-extension://bok/bookmark-manager.html#bok-inbox-default-folder-marker',
 });
@@ -134,27 +136,24 @@ fakeBrowser.bookmarks.getSubTree = async () => [
   {
     id: '1',
     title: 'Bookmarks Bar',
-    children: [{ id: '6', title: 'Temp', children: [] }],
+    children: [{ id: '8', title: 'Temp', children: [] }],
   },
 ];
 createdDetails = undefined;
 removedIds.length = 0;
 
 assert.deepEqual(await getDefaultBookmarkFolderSettings(), {
-  configuredFolderId: '7',
+  configuredFolderId: '6',
   selectedFolderId: null,
   missingConfiguredFolder: true,
-  options: [
-    { id: '1', label: '书签栏' },
-    { id: '6', label: '书签栏 / Temp' },
-  ],
+  options: [{ id: '8', label: '书签栏 / Temp' }],
 });
 assert.equal(await markDefaultBookmarkFolderAsMostRecentlyModified(), false);
 assert.equal(createdDetails, undefined);
 assert.deepEqual(removedIds, []);
 await assert.rejects(
   setDefaultBookmarkFolderId('missing-folder'),
-  /默认书签目录已不存在/,
+  /默认书签目录必须是书签栏一级文件夹/,
 );
 
 function createEvent() {
@@ -269,6 +268,11 @@ fakeBrowser.bookmarks.getSubTree = async () => [
     children: [
       {
         id: '6',
+        title: 'Projects',
+        children: [],
+      },
+      {
+        id: '7',
         title: 'Old default',
         children: [
           {
@@ -278,14 +282,13 @@ fakeBrowser.bookmarks.getSubTree = async () => [
           },
         ],
       },
-      { id: '7', title: 'Bok', children: [] },
     ],
   },
 ];
 createdDetails = undefined;
 removedIds.length = 0;
 assert.equal(await recoverDefaultBookmarkFolderMarkers(), true);
-assert.equal(createdDetails?.parentId, '7');
+assert.equal(createdDetails?.parentId, '6');
 assert.deepEqual(removedIds, ['marker-old-folder', 'marker-new']);
 
 fakeBrowser.bookmarks.getSubTree = async () => [
@@ -311,14 +314,14 @@ bookmarkCreated.emit('created-bookmark', {
   url: 'https://created.example',
 });
 await new Promise((resolve) => setTimeout(resolve, 300));
-assert.equal(createdDetails?.parentId, '7');
+assert.equal(createdDetails?.parentId, '6');
 assert.deepEqual(removedIds, ['marker-new']);
 
 createdDetails = undefined;
 removedIds.length = 0;
 bookmarkMoved.emit('moved-bookmark');
 await new Promise((resolve) => setTimeout(resolve, 300));
-assert.equal(createdDetails?.parentId, '7');
+assert.equal(createdDetails?.parentId, '6');
 assert.deepEqual(removedIds, ['marker-new']);
 
 createdDetails = undefined;

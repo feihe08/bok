@@ -820,7 +820,7 @@ export default function SettingsPage() {
                             value={bookmarkFolderSettings.configuredFolderId ?? ''}
                             disabled
                           >
-                            原目录已不存在
+                            原目录不再可选
                           </option>
                         )}
                       {bookmarksPermission &&
@@ -838,9 +838,9 @@ export default function SettingsPage() {
                     </select>
                     <p id="default-bookmark-folder-help">
                       {!bookmarksPermission
-                        ? '允许书签访问后，可选择书签栏及其子文件夹。'
+                        ? '允许书签访问后，可选择书签栏中的一级文件夹。'
                         : bookmarkFolderSettings.missingConfiguredFolder
-                          ? '原目录已删除或移出书签栏，请重新选择。'
+                          ? '原目录已删除、移出书签栏或不在一级目录，请重新选择。'
                           : bookmarkFolderSettings.configuredFolderId == null
                             ? '当前沿用 Inbox；选择后只在当前 Chrome 资料中生效。'
                             : '只在当前 Chrome 资料中生效，不随设置备份迁移。'}
