@@ -14,14 +14,6 @@
 - Do not edit files until the user explicitly confirms the proposed data model changes.
 - After implementation, explicitly report the data model changes that were actually made.
 
-## Feature Development Workflow
-
-- Develop each new feature in a dedicated Git worktree on a `codex/`-prefixed branch created from `main`. Do not modify the primary `main` worktree while developing the feature.
-- Before creating the worktree, inspect the repository status and existing worktrees. Preserve unrelated or uncommitted user changes.
-- Complete the implementation, proportional verification, and code review in the feature worktree, then commit only the approved feature scope.
-- Before merging, re-check the primary `main` worktree. If its uncommitted changes or concurrent branch movement make the merge unsafe, stop and ask the user instead of stashing, overwriting, rebasing, or discarding their work.
-- Merge the completed feature branch into `main` without force. Only after the merge and relevant verification succeed, remove the feature worktree. Never remove a worktree containing uncommitted or unmerged work.
-
 ## Releases
 
 - Every Bok release must follow the repository's current release workflow and synchronize both the unpacked extension and ZIP package to the iCloud release directory through `scripts/sync-release.mjs`.
