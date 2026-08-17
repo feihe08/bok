@@ -492,6 +492,40 @@ export async function ignoreTaskTab(
   if (changed) await setBindings(bindings);
 }
 
+export async function detachMovedTaskTabBinding(
+  sessionId: string,
+  savedGroupId: string | null,
+  savedTabId: string,
+  removeBinding: boolean,
+): Promise<void> {
+  if (savedGroupId === null) return;
+
+  const bindings = structuredClone(await getBindings());
+  const key = bindingKey(sessionId, savedGroupId);
+  const binding = bindings[key];
+  if (!binding) return;
+
+  if (removeBinding) {
+    delete bindings[key];
+    await setBindings(bindings);
+    return;
+  }
+
+  let changed = false;
+  for (const [browserTabId, mappedSavedTabId] of Object.entries(
+    binding.savedTabIdByBrowserTabId,
+  )) {
+    if (mappedSavedTabId !== savedTabId) continue;
+    delete binding.savedTabIdByBrowserTabId[browserTabId];
+    const id = Number(browserTabId);
+    if (!binding.ignoredBrowserTabIds.includes(id)) {
+      binding.ignoredBrowserTabIds.push(id);
+    }
+    changed = true;
+  }
+  if (changed) await setBindings(bindings);
+}
+
 export async function ignoreMissingTaskGroupTabs(
   sessionId: string,
   savedGroupId: string,

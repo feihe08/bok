@@ -16,6 +16,7 @@ const {
   deduplicateGroup,
   getSavedSession,
   getUnarchivedSavedGroupTargets,
+  moveTab,
   removeGroup,
   removeSession,
   removeTab,
@@ -29,6 +30,7 @@ const {
   bindOpenedTaskGroups,
   clearTaskGroupBindingsForSession,
   getActiveTaskGroupBindings,
+  reconcileTaskGroup,
 } = await import('../libs/tab-group-sync/sync.ts');
 const {
   openSavedSession,
@@ -77,6 +79,29 @@ for (const command of [
   { type: 'bok/set-session-archived', sessionId: 's', archived: false },
   { type: 'bok/set-session-task-status', sessionId: 's', status: 'doing' },
   { type: 'bok/set-session-locked', sessionId: 's', locked: true },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+    targetGroupId: null,
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+    targetGroupId: 'group',
+    targetBeforeTabId: 'before-tab',
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+    targetGroupId: null,
+    targetBeforeTabId: null,
+  },
 ]) {
   assert.equal(isSavedPageCommand(command), true, command.type);
 }
@@ -88,6 +113,45 @@ assert.equal(
   }),
   false,
 );
+for (const command of [
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 1,
+    targetGroupId: null,
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 1,
+    targetSessionId: 'target',
+    targetGroupId: null,
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+    targetGroupId: 1,
+  },
+  {
+    type: 'bok/move-tab',
+    sessionId: 's',
+    tabId: 'tab',
+    targetSessionId: 'target',
+    targetGroupId: null,
+    targetBeforeTabId: 1,
+  },
+]) {
+  assert.equal(isSavedPageCommand(command), false, JSON.stringify(command));
+}
 
 await writeSessions([session('state-session', [{ type: 'tab', tab: tab('state-tab') }])]);
 await renameSession('state-session', '  Custom name  ');
@@ -188,6 +252,492 @@ await assert.rejects(
   () => appendTabsToGroup('active-target-session', 'missing-target', []),
   /找不到要操作的分组/,
 );
+
+const metadataTab = {
+  ...tab('metadata-tab', 'https://metadata.example/path'),
+  title: 'Metadata tab',
+  favIconUrl: 'https://metadata.example/favicon.ico',
+  createdAt: 11,
+  updatedAt: 22,
+  tags: ['work', 'important'],
+  directory: ['Projects'],
+  taskStatus: 'done',
+  taskCompletedAt: 33,
+  archivedAt: null,
+};
+
+await writeSessions([
+  session('move-direct-source', [{ type: 'tab', tab: metadataTab }]),
+  session(
+    'move-direct-target',
+    [
+      { type: 'tab', tab: tab('direct-target-existing') },
+      {
+        type: 'group',
+        group: group('direct-target-group', [tab('direct-target-group-tab')]),
+      },
+    ],
+    { locked: true },
+  ),
+]);
+let moveResult = await moveTab(
+  'move-direct-source',
+  'metadata-tab',
+  'move-direct-target',
+  null,
+);
+assert.deepEqual(moveResult, {
+  moved: true,
+  containerChanged: true,
+  sourceSessionId: 'move-direct-source',
+  sourceGroupId: null,
+  removedSourceGroup: false,
+});
+let movedSessions = await getSessions();
+assert.deepEqual(movedSessions.map((item) => item.id), ['move-direct-target']);
+assert.deepEqual(
+  movedSessions[0].items.map((item) => item.type === 'tab' ? item.tab.id : item.group.id),
+  ['direct-target-existing', 'metadata-tab', 'direct-target-group'],
+  'direct append inserts after the last direct tab, before later groups',
+);
+assert.deepEqual(movedSessions[0].items[1].tab, metadataTab);
+
+await writeSessions([
+  session('move-group-same-direct', [
+    {
+      type: 'group',
+      group: group('same-direct-source-group', [
+        tab('same-direct-moved'),
+        tab('same-direct-stays'),
+      ]),
+    },
+    { type: 'tab', tab: tab('same-direct-existing') },
+  ]),
+]);
+moveResult = await moveTab(
+  'move-group-same-direct',
+  'same-direct-moved',
+  'move-group-same-direct',
+  null,
+);
+assert.equal(moveResult.removedSourceGroup, false);
+storedSession = await getSavedSession('move-group-same-direct');
+assert.deepEqual(
+  storedSession.items.map((item) =>
+    item.type === 'tab'
+      ? `tab:${item.tab.id}`
+      : `group:${item.group.tabs.map((item) => item.id).join(',')}`,
+  ),
+  [
+    'group:same-direct-stays',
+    'tab:same-direct-existing',
+    'tab:same-direct-moved',
+  ],
+);
+
+await writeSessions([
+  session('move-group-other-source', [
+    {
+      type: 'group',
+      group: group('move-group-other-group', [tab('move-group-other-tab')]),
+    },
+  ]),
+  session('move-group-other-target', [
+    { type: 'tab', tab: tab('move-group-other-existing') },
+  ]),
+]);
+moveResult = await moveTab(
+  'move-group-other-source',
+  'move-group-other-tab',
+  'move-group-other-target',
+  null,
+);
+assert.equal(moveResult.removedSourceGroup, true);
+movedSessions = await getSessions();
+assert.deepEqual(movedSessions.map((item) => item.id), ['move-group-other-target']);
+assert.deepEqual(
+  movedSessions[0].items.map((item) => item.tab.id),
+  ['move-group-other-existing', 'move-group-other-tab'],
+);
+
+await writeSessions([
+  session('move-direct-group-source', [
+    { type: 'tab', tab: metadataTab },
+    { type: 'tab', tab: tab('move-direct-group-stays') },
+  ]),
+  session(
+    'move-direct-group-target',
+    [
+      {
+        type: 'group',
+        group: group(
+          'move-direct-target-group',
+          [tab('move-direct-group-existing')],
+          { locked: true },
+        ),
+      },
+    ],
+    { locked: true },
+  ),
+]);
+await moveTab(
+  'move-direct-group-source',
+  'metadata-tab',
+  'move-direct-group-target',
+  'move-direct-target-group',
+);
+storedSession = await getSavedSession('move-direct-group-target');
+assert.deepEqual(
+  storedSession.items[0].group.tabs.map((item) => item.id),
+  ['move-direct-group-existing', 'metadata-tab'],
+);
+assert.deepEqual(storedSession.items[0].group.tabs[1], metadataTab);
+
+await writeSessions([
+  session('move-group-to-group', [
+    {
+      type: 'group',
+      group: group('move-group-source', [tab('move-group-tab')]),
+    },
+    {
+      type: 'group',
+      group: group('move-group-target', [tab('move-group-existing')]),
+    },
+  ]),
+]);
+moveResult = await moveTab(
+  'move-group-to-group',
+  'move-group-tab',
+  'move-group-to-group',
+  'move-group-target',
+);
+assert.equal(moveResult.removedSourceGroup, true);
+storedSession = await getSavedSession('move-group-to-group');
+assert.deepEqual(storedSession.items.map((item) => item.group.id), ['move-group-target']);
+assert.deepEqual(
+  storedSession.items[0].group.tabs.map((item) => item.id),
+  ['move-group-existing', 'move-group-tab'],
+);
+
+await writeSessions([
+  session('reorder-direct', [
+    { type: 'tab', tab: tab('reorder-direct-first') },
+    {
+      type: 'group',
+      group: group('reorder-direct-middle-group', [tab('reorder-direct-group-tab')]),
+    },
+    { type: 'tab', tab: tab('reorder-direct-second') },
+    { type: 'tab', tab: tab('reorder-direct-third') },
+  ]),
+]);
+moveResult = await moveTab(
+  'reorder-direct',
+  'reorder-direct-third',
+  'reorder-direct',
+  null,
+  'reorder-direct-first',
+);
+assert.equal(moveResult.moved, true);
+assert.equal(moveResult.containerChanged, false);
+storedSession = await getSavedSession('reorder-direct');
+assert.deepEqual(
+  storedSession.items.flatMap((item) => item.type === 'tab' ? [item.tab.id] : []),
+  ['reorder-direct-third', 'reorder-direct-first', 'reorder-direct-second'],
+  'direct tabs in one session can be reordered around grouped items',
+);
+
+await writeSessions([
+  session('reorder-group', [
+    {
+      type: 'group',
+      group: group('reorder-group-target', [
+        tab('reorder-group-first'),
+        tab('reorder-group-second'),
+        tab('reorder-group-third'),
+      ]),
+    },
+  ]),
+]);
+moveResult = await moveTab(
+  'reorder-group',
+  'reorder-group-third',
+  'reorder-group',
+  'reorder-group-target',
+  'reorder-group-first',
+);
+assert.equal(moveResult.moved, true);
+assert.equal(moveResult.containerChanged, false);
+assert.deepEqual(
+  (await getSavedSession('reorder-group')).items[0].group.tabs.map((item) => item.id),
+  ['reorder-group-third', 'reorder-group-first', 'reorder-group-second'],
+  'tabs in one group can be reordered',
+);
+
+await writeSessions([
+  session('move-before-source-session', [
+    { type: 'tab', tab: tab('move-before-cross-session') },
+  ]),
+  session('move-before-target-session', [
+    { type: 'tab', tab: tab('move-before-target-first') },
+    {
+      type: 'group',
+      group: group('move-before-target-group', [tab('move-before-target-group-tab')]),
+    },
+    { type: 'tab', tab: tab('move-before-target-second') },
+  ]),
+]);
+moveResult = await moveTab(
+  'move-before-source-session',
+  'move-before-cross-session',
+  'move-before-target-session',
+  null,
+  'move-before-target-second',
+);
+assert.equal(moveResult.containerChanged, true);
+assert.deepEqual(
+  (await getSavedSession('move-before-target-session')).items.flatMap((item) =>
+    item.type === 'tab' ? [item.tab.id] : [],
+  ),
+  [
+    'move-before-target-first',
+    'move-before-cross-session',
+    'move-before-target-second',
+  ],
+  'a cross-session move inserts before the requested direct tab',
+);
+
+await writeSessions([
+  session('move-before-groups', [
+    {
+      type: 'group',
+      group: group('move-before-source-group', [
+        tab('move-before-cross-group'),
+        tab('move-before-source-stays'),
+      ]),
+    },
+    {
+      type: 'group',
+      group: group('move-before-target-group', [
+        tab('move-before-group-first'),
+        tab('move-before-group-second'),
+      ]),
+    },
+  ]),
+]);
+moveResult = await moveTab(
+  'move-before-groups',
+  'move-before-cross-group',
+  'move-before-groups',
+  'move-before-target-group',
+  'move-before-group-second',
+);
+assert.equal(moveResult.containerChanged, true);
+assert.deepEqual(
+  (await getSavedSession('move-before-groups')).items[1].group.tabs.map(
+    (item) => item.id,
+  ),
+  [
+    'move-before-group-first',
+    'move-before-cross-group',
+    'move-before-group-second',
+  ],
+  'a cross-group move inserts before the requested group tab',
+);
+
+await writeSessions([
+  session('move-no-op', [
+    { type: 'tab', tab: tab('move-no-op-direct') },
+    {
+      type: 'group',
+      group: group('move-no-op-group', [
+        tab('move-no-op-group-tab'),
+        tab('move-no-op-group-after'),
+      ]),
+    },
+  ]),
+]);
+const noOpBefore = await fakeBrowser.storage.local.get('sessions');
+moveResult = await moveTab(
+  'move-no-op',
+  'move-no-op-direct',
+  'move-no-op',
+  null,
+);
+assert.equal(moveResult.moved, false);
+moveResult = await moveTab(
+  'move-no-op',
+  'move-no-op-group-tab',
+  'move-no-op',
+  'move-no-op-group',
+  'move-no-op-group-after',
+);
+assert.equal(moveResult.moved, false);
+moveResult = await moveTab(
+  'move-no-op',
+  'move-no-op-group-after',
+  'move-no-op',
+  'move-no-op-group',
+);
+assert.equal(moveResult.moved, false);
+moveResult = await moveTab(
+  'move-no-op',
+  'move-no-op-direct',
+  'move-no-op',
+  null,
+  'move-no-op-direct',
+);
+assert.equal(moveResult.moved, false);
+assert.deepEqual(await fakeBrowser.storage.local.get('sessions'), noOpBefore);
+
+async function assertMoveRejected(sourceSessions, command, error) {
+  await writeSessions(sourceSessions);
+  const before = await getSessions();
+  await assert.rejects(() => moveTab(
+    command.sessionId,
+    command.tabId,
+    command.targetSessionId,
+    command.targetGroupId,
+    command.targetBeforeTabId ?? null,
+  ), error);
+  assert.deepEqual(await getSessions(), before, `partial move: ${error}`);
+}
+
+const activeMoveSessions = () => [
+  session('rejected-source', [
+    { type: 'tab', tab: tab('rejected-direct') },
+    {
+      type: 'group',
+      group: group('rejected-source-group', [tab('rejected-group-tab')]),
+    },
+  ]),
+  session('rejected-target', [
+    {
+      type: 'group',
+      group: group('rejected-target-group', [tab('rejected-target-tab')]),
+    },
+  ]),
+];
+
+await assertMoveRejected(activeMoveSessions(), {
+  sessionId: 'missing-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /找不到要操作的保存记录/);
+await assertMoveRejected(activeMoveSessions(), {
+  sessionId: 'rejected-source',
+  tabId: 'missing-tab',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /找不到要移动的标签页/);
+await assertMoveRejected(activeMoveSessions(), {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'missing-target',
+  targetGroupId: null,
+}, /找不到要操作的保存记录/);
+await assertMoveRejected(activeMoveSessions(), {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: 'missing-group',
+}, /找不到要操作的分组/);
+await assertMoveRejected(activeMoveSessions(), {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: 'rejected-target-group',
+  targetBeforeTabId: 'missing-before-tab',
+}, /找不到目标位置的标签页/);
+await assertMoveRejected([
+  session('rejected-source', [{ type: 'tab', tab: tab('rejected-direct') }], {
+    archivedAt: 200,
+  }),
+  activeMoveSessions()[1],
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /来源保存记录已归档/);
+await assertMoveRejected([
+  activeMoveSessions()[0],
+  session('rejected-target', [
+    { type: 'tab', tab: tab('rejected-target-tab') },
+  ], { archivedAt: 200 }),
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /目标保存记录已归档/);
+await assertMoveRejected([
+  session('rejected-source', [
+    {
+      type: 'group',
+      group: { ...group('rejected-source-group', [tab('rejected-group-tab')]), archivedAt: 200 },
+    },
+  ]),
+  activeMoveSessions()[1],
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-group-tab',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /来源分组已归档/);
+await assertMoveRejected([
+  activeMoveSessions()[0],
+  session('rejected-target', [
+    {
+      type: 'group',
+      group: { ...group('rejected-target-group', [tab('rejected-target-tab')]), archivedAt: 200 },
+    },
+  ]),
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: 'rejected-target-group',
+}, /目标分组已归档/);
+await assertMoveRejected([
+  session('rejected-source', [
+    {
+      type: 'tab',
+      tab: { ...tab('rejected-direct'), archivedAt: 200 },
+    },
+  ]),
+  activeMoveSessions()[1],
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /来源标签页已归档/);
+await assertMoveRejected([
+  session('rejected-source', [{ type: 'tab', tab: tab('rejected-direct') }], {
+    locked: true,
+  }),
+  activeMoveSessions()[1],
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-direct',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /来源保存记录已锁定/);
+await assertMoveRejected([
+  session('rejected-source', [
+    {
+      type: 'group',
+      group: group('rejected-source-group', [tab('rejected-group-tab')], { locked: true }),
+    },
+  ]),
+  activeMoveSessions()[1],
+], {
+  sessionId: 'rejected-source',
+  tabId: 'rejected-group-tab',
+  targetSessionId: 'rejected-target',
+  targetGroupId: null,
+}, /来源分组已锁定/);
 
 await writeSessions([
   session('locked-group-session', [
@@ -586,6 +1136,276 @@ await assert.rejects(
   /找不到要操作的分组/,
 );
 assert.equal(removedTabs.length, removedBeforeRejectedTargetSave);
+
+await writeSessions([
+  session('reorder-bound-session', [
+    {
+      type: 'group',
+      group: group('reorder-bound-group', [
+        tab('reorder-bound-first'),
+        tab('reorder-bound-second'),
+      ]),
+    },
+  ]),
+]);
+await bindOpenedTaskGroups('reorder-bound-session', [
+  {
+    savedGroupId: 'reorder-bound-group',
+    browserGroupId: 90,
+    windowId: 5,
+    openedTabIdBySavedTabId: {
+      'reorder-bound-first': 700,
+      'reorder-bound-second': 701,
+    },
+  },
+]);
+const reorderBindingBefore = structuredClone(
+  (await fakeBrowser.storage.session.get('task-group-bindings'))[
+    'task-group-bindings'
+  ]['reorder-bound-session:reorder-bound-group'],
+);
+const originalReorderSessionSet = fakeBrowser.storage.session.set;
+fakeBrowser.storage.session.set = async () => {
+  throw new Error('same-group reorder must not write sync bindings');
+};
+try {
+  await executeSavedPageCommand({
+    type: 'bok/move-tab',
+    sessionId: 'reorder-bound-session',
+    tabId: 'reorder-bound-second',
+    targetSessionId: 'reorder-bound-session',
+    targetGroupId: 'reorder-bound-group',
+    targetBeforeTabId: 'reorder-bound-first',
+  });
+} finally {
+  fakeBrowser.storage.session.set = originalReorderSessionSet;
+}
+assert.deepEqual(
+  (await getSavedSession('reorder-bound-session')).items[0].group.tabs.map(
+    (item) => item.id,
+  ),
+  ['reorder-bound-second', 'reorder-bound-first'],
+);
+assert.deepEqual(
+  (await fakeBrowser.storage.session.get('task-group-bindings'))[
+    'task-group-bindings'
+  ]['reorder-bound-session:reorder-bound-group'],
+  reorderBindingBefore,
+  'same-group reordering must not detach or ignore the live group binding',
+);
+
+await writeSessions([
+  session('move-bound-source', [
+    {
+      type: 'group',
+      group: group('move-bound-source-group', [
+        tab('move-bound-tab'),
+        tab('move-bound-stays'),
+      ]),
+    },
+  ]),
+  session('move-bound-target', [
+    {
+      type: 'group',
+      group: group('move-bound-target-group', [tab('move-bound-target-tab')]),
+    },
+  ]),
+]);
+await bindOpenedTaskGroups('move-bound-source', [
+  {
+    savedGroupId: 'move-bound-source-group',
+    browserGroupId: 91,
+    windowId: 5,
+    openedTabIdBySavedTabId: {
+      'move-bound-tab': 710,
+      'move-bound-stays': 711,
+    },
+  },
+]);
+await bindOpenedTaskGroups('move-bound-target', [
+  {
+    savedGroupId: 'move-bound-target-group',
+    browserGroupId: 92,
+    windowId: 5,
+    openedTabIdBySavedTabId: { 'move-bound-target-tab': 720 },
+  },
+]);
+fakeBrowser.tabGroups.get = async (id) => ({
+  id,
+  windowId: 5,
+  title: id === 91 ? 'move-bound-source-group' : 'move-bound-target-group',
+  color: 'grey',
+});
+fakeBrowser.tabs.query = async (query) => {
+  if (query.groupId === 91) {
+    return [
+      {
+        id: 710,
+        index: 0,
+        windowId: 5,
+        groupId: 91,
+        url: 'https://move-bound-tab.example',
+        title: 'move-bound-tab',
+      },
+      {
+        id: 711,
+        index: 1,
+        windowId: 5,
+        groupId: 91,
+        url: 'https://move-bound-stays.example',
+        title: 'move-bound-stays',
+      },
+    ];
+  }
+  return [];
+};
+await executeSavedPageCommand({
+  type: 'bok/move-tab',
+  sessionId: 'move-bound-source',
+  tabId: 'move-bound-tab',
+  targetSessionId: 'move-bound-target',
+  targetGroupId: 'move-bound-target-group',
+});
+let moveBindings = (await fakeBrowser.storage.session.get('task-group-bindings'))[
+  'task-group-bindings'
+];
+assert.deepEqual(
+  moveBindings['move-bound-source:move-bound-source-group'].savedTabIdByBrowserTabId,
+  { 711: 'move-bound-stays' },
+);
+assert.deepEqual(
+  moveBindings['move-bound-source:move-bound-source-group'].ignoredBrowserTabIds,
+  [710],
+);
+assert.deepEqual(
+  moveBindings['move-bound-target:move-bound-target-group'].savedTabIdByBrowserTabId,
+  { 720: 'move-bound-target-tab' },
+  'moving a saved tab must not inject it into the target live group binding',
+);
+await reconcileTaskGroup(91);
+assert.deepEqual(
+  (await getSavedSession('move-bound-source')).items[0].group.tabs.map(
+    (item) => item.id,
+  ),
+  ['move-bound-stays'],
+  'the source live group must not write an ignored moved tab back',
+);
+assert.deepEqual(
+  (await getSavedSession('move-bound-target')).items[0].group.tabs.map(
+    (item) => item.id,
+  ),
+  ['move-bound-target-tab', 'move-bound-tab'],
+);
+
+await writeSessions([
+  session('move-empty-bound-source', [
+    {
+      type: 'group',
+      group: group('move-empty-bound-group', [tab('move-empty-bound-tab')]),
+    },
+  ]),
+  session('move-empty-bound-target', [
+    { type: 'tab', tab: tab('move-empty-bound-target-tab') },
+  ]),
+]);
+await bindOpenedTaskGroups('move-empty-bound-source', [
+  {
+    savedGroupId: 'move-empty-bound-group',
+    browserGroupId: 93,
+    windowId: 5,
+    openedTabIdBySavedTabId: { 'move-empty-bound-tab': 730 },
+  },
+]);
+await executeSavedPageCommand({
+  type: 'bok/move-tab',
+  sessionId: 'move-empty-bound-source',
+  tabId: 'move-empty-bound-tab',
+  targetSessionId: 'move-empty-bound-target',
+  targetGroupId: null,
+});
+moveBindings = (await fakeBrowser.storage.session.get('task-group-bindings'))[
+  'task-group-bindings'
+];
+assert.equal(
+  moveBindings['move-empty-bound-source:move-empty-bound-group'],
+  undefined,
+  'an emptied source group binding must be cleared',
+);
+assert.equal(
+  (await getSessions()).some((item) => item.id === 'move-empty-bound-source'),
+  false,
+  'an emptied cross-session source must be removed',
+);
+
+await writeSessions([
+  session('move-sync-failure-source', [
+    {
+      type: 'group',
+      group: group('move-sync-failure-group', [
+        tab('move-sync-failure-tab'),
+        tab('move-sync-failure-stays'),
+      ]),
+    },
+  ]),
+  session('move-sync-failure-target', [
+    { type: 'tab', tab: tab('move-sync-failure-target-tab') },
+  ]),
+]);
+await bindOpenedTaskGroups('move-sync-failure-source', [
+  {
+    savedGroupId: 'move-sync-failure-group',
+    browserGroupId: 94,
+    windowId: 5,
+    openedTabIdBySavedTabId: {
+      'move-sync-failure-tab': 740,
+      'move-sync-failure-stays': 741,
+    },
+  },
+]);
+const moveSyncFailureBindings = structuredClone(
+  (await fakeBrowser.storage.session.get('task-group-bindings'))[
+    'task-group-bindings'
+  ],
+);
+const originalMoveSessionSet = fakeBrowser.storage.session.set;
+fakeBrowser.storage.session.set = async () => {
+  throw new Error('session storage unavailable');
+};
+try {
+  await assert.rejects(
+    () => executeSavedPageCommand({
+      type: 'bok/move-tab',
+      sessionId: 'move-sync-failure-source',
+      tabId: 'move-sync-failure-tab',
+      targetSessionId: 'move-sync-failure-target',
+      targetGroupId: null,
+    }),
+    /session storage unavailable/,
+  );
+} finally {
+  fakeBrowser.storage.session.set = originalMoveSessionSet;
+}
+assert.deepEqual(
+  (await getSavedSession('move-sync-failure-source')).items[0].group.tabs.map(
+    (item) => item.id,
+  ),
+  ['move-sync-failure-tab', 'move-sync-failure-stays'],
+  'a failed source binding update must roll the saved tab back into its source group',
+);
+assert.deepEqual(
+  (await getSavedSession('move-sync-failure-target')).items.map((item) =>
+    item.type === 'tab' ? item.tab.id : item.group.id,
+  ),
+  ['move-sync-failure-target-tab'],
+  'a failed source binding update must remove the saved tab from its target',
+);
+assert.deepEqual(
+  (await fakeBrowser.storage.session.get('task-group-bindings'))[
+    'task-group-bindings'
+  ],
+  moveSyncFailureBindings,
+  'a rejected session storage write must leave the original binding intact',
+);
 
 await writeSessions([
   session('remove-me', [{ type: 'tab', tab: tab('remove-tab') }]),

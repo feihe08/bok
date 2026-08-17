@@ -38,6 +38,14 @@ export interface SavedGroupTarget {
   title: string;
 }
 
+export interface MoveTabResult {
+  moved: boolean;
+  containerChanged: boolean;
+  sourceSessionId: string;
+  sourceGroupId: string | null;
+  removedSourceGroup: boolean;
+}
+
 function requireSession(
   sessions: SavedSession[],
   sessionId: string,
@@ -239,6 +247,151 @@ export async function removeTab(sessionId: string, tabId: string): Promise<void>
       ? sessions
       : sessions.filter((session) => session.id !== sessionId),
   );
+}
+
+/** Move one saved tab atomically, cleaning up its emptied source container. */
+export async function moveTab(
+  sessionId: string,
+  tabId: string,
+  targetSessionId: string,
+  targetGroupId: string | null,
+  targetBeforeTabId: string | null = null,
+): Promise<MoveTabResult> {
+  const sessions = await getSessions();
+  const sourceSession = requireSession(sessions, sessionId);
+  const targetSession = requireSession(sessions, targetSessionId);
+  if (sourceSession.archivedAt !== null) {
+    throw new Error('来源保存记录已归档，请先恢复');
+  }
+  if (targetSession.archivedAt !== null) {
+    throw new Error('目标保存记录已归档，请先恢复');
+  }
+  if (sourceSession.locked) {
+    throw new Error('来源保存记录已锁定，无法移动其中的标签页');
+  }
+
+  const sourceItem = requireSessionItems(sourceSession).find((item) =>
+    item.type === 'tab'
+      ? item.tab.id === tabId
+      : item.group.tabs.some((tab) => tab.id === tabId),
+  );
+  if (!sourceItem) throw new Error('找不到要移动的标签页');
+
+  const sourceGroup = sourceItem.type === 'group' ? sourceItem.group : null;
+  const movedTab =
+    sourceItem.type === 'tab'
+      ? sourceItem.tab
+      : requireTab(sourceItem.group, tabId);
+  if (movedTab.archivedAt !== null) {
+    throw new Error('来源标签页已归档，请先恢复');
+  }
+  if (sourceGroup && sourceGroup.archivedAt !== null) {
+    throw new Error('来源分组已归档，请先恢复');
+  }
+  if (sourceGroup?.locked) {
+    throw new Error('来源分组已锁定，无法移动其中的标签页');
+  }
+
+  const targetGroup =
+    targetGroupId === null
+      ? null
+      : requireGroup(targetSession, targetGroupId);
+  if (targetGroup && targetGroup.archivedAt !== null) {
+    throw new Error('目标分组已归档，请先恢复');
+  }
+
+  const sourceGroupId = sourceGroup?.id ?? null;
+  const containerChanged =
+    sessionId !== targetSessionId || sourceGroupId !== targetGroupId;
+  const targetTabs = targetGroup
+    ? targetGroup.tabs
+    : targetSession.items.flatMap((item) =>
+        item.type === 'tab' ? [item.tab] : [],
+      );
+  if (
+    targetBeforeTabId !== null &&
+    !targetTabs.some((tab) => tab.id === targetBeforeTabId)
+  ) {
+    throw new Error('找不到目标位置的标签页');
+  }
+
+  if (!containerChanged) {
+    const currentTabIds = targetTabs.map((tab) => tab.id);
+    if (targetBeforeTabId === tabId) {
+      return {
+        moved: false,
+        containerChanged: false,
+        sourceSessionId: sessionId,
+        sourceGroupId,
+        removedSourceGroup: false,
+      };
+    }
+    const reorderedTabIds = currentTabIds.filter((id) => id !== tabId);
+    const targetIndex =
+      targetBeforeTabId === null
+        ? reorderedTabIds.length
+        : reorderedTabIds.indexOf(targetBeforeTabId);
+    reorderedTabIds.splice(targetIndex, 0, tabId);
+    if (reorderedTabIds.every((id, index) => id === currentTabIds[index])) {
+      return {
+        moved: false,
+        containerChanged: false,
+        sourceSessionId: sessionId,
+        sourceGroupId,
+        removedSourceGroup: false,
+      };
+    }
+  }
+
+  let removedSourceGroup = false;
+  if (sourceItem.type === 'tab') {
+    sourceSession.items.splice(sourceSession.items.indexOf(sourceItem), 1);
+  } else {
+    sourceItem.group.tabs.splice(
+      sourceItem.group.tabs.findIndex((tab) => tab.id === tabId),
+      1,
+    );
+    if (sourceItem.group.tabs.length === 0) {
+      sourceSession.items.splice(sourceSession.items.indexOf(sourceItem), 1);
+      removedSourceGroup = true;
+    }
+  }
+
+  if (targetGroup) {
+    const targetIndex =
+      targetBeforeTabId === null
+        ? targetGroup.tabs.length
+        : targetGroup.tabs.findIndex((tab) => tab.id === targetBeforeTabId);
+    targetGroup.tabs.splice(targetIndex, 0, movedTab);
+  } else if (targetBeforeTabId !== null) {
+    const targetIndex = targetSession.items.findIndex(
+      (item) => item.type === 'tab' && item.tab.id === targetBeforeTabId,
+    );
+    targetSession.items.splice(targetIndex, 0, { type: 'tab', tab: movedTab });
+  } else {
+    let lastDirectTabIndex = -1;
+    targetSession.items.forEach((item, index) => {
+      if (item.type === 'tab') lastDirectTabIndex = index;
+    });
+    const targetIndex =
+      lastDirectTabIndex === -1
+        ? targetSession.items.length
+        : lastDirectTabIndex + 1;
+    targetSession.items.splice(targetIndex, 0, { type: 'tab', tab: movedTab });
+  }
+
+  await writeSessions(
+    sourceSession !== targetSession && sourceSession.items.length === 0
+      ? sessions.filter((session) => session !== sourceSession)
+      : sessions,
+  );
+  return {
+    moved: true,
+    containerChanged,
+    sourceSessionId: sessionId,
+    sourceGroupId,
+    removedSourceGroup,
+  };
 }
 
 export async function renameTab(

@@ -185,9 +185,10 @@ SavedSession
 
 `locked: true` 不影响重命名、归档、固定、任务标记或打开。Session 锁定时
 不能删除整个 Session 或其独立标签；任一子 Group 锁定时也不允许删除整个
-Session。Group 锁定时不能删除该组或组内标签，也不能组内去重。`pinned: true`
-表示固定并让自动归档跳过该对象；Session 内仍保持原始 item 顺序，不因固定或
-筛选重排。`restoredAt` 记录最近一次手动恢复时间；自动归档会从 `createdAt`
+Session。Group 锁定时不能删除该组或组内标签，也不能组内去重。锁定的 Session
+或 Group 不能作为标签页移动的来源；沿用既有锁定语义时，仍可作为移动目标。
+`pinned: true` 表示固定并让自动归档跳过该对象；Session 内仍保持原始 item 顺序，
+不因固定或筛选重排。`restoredAt` 记录最近一次手动恢复时间；自动归档会从 `createdAt`
 与 `restoredAt` 中较晚的时间重新计算所选周期。`archivedAt` 是对应对象
 归档状态的唯一来源。
 
@@ -343,6 +344,12 @@ schema v3 envelope 重新写入存储，并先按上述规则保留 `sessionsPre
 
 - `open-session` 始终读取完整持久化 Session，不受搜索或当前渲染筛选影响。
   direct tab 和多个 Chrome Group 按 `items` 顺序还原；标签组保留名称和颜色。
+- 当前视图中的未归档标签页可以在同一 Session 的 direct items 或同一 Chrome Group
+  内排序，也可以原子移动到其他 Session 的 direct items 或其他 Chrome Group 的指定
+  位置；未指定位置时追加到目标容器末尾。移动保留 `SavedTab` 的 ID 和全部字段；来源
+  Group 或 Session 变空时同步移除空容器。从活跃同步组移出的标签会从该组运行期映射中
+  忽略，避免后续同步写回原组；若运行期映射更新失败，则回滚保存记录移动。仅在同一容器
+  内排序时不改变运行期映射。移动不会主动操作目标组中已打开的 Chrome 标签。
 - 目的地可以是保存页所在窗口或新窗口。打开到当前窗口时，整个 Session
   作为连续块追加；新窗口会复用创建窗口产生的首个 tab，不重复打开首条记录。
   创建完成后激活第一条标签页。

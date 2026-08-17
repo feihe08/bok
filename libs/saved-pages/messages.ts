@@ -36,6 +36,14 @@ export type SavedPageCommand =
   | { type: 'bok/set-session-locked'; sessionId: string; locked: boolean }
   | { type: 'bok/remove-tab'; sessionId: string; tabId: string }
   | {
+      type: 'bok/move-tab';
+      sessionId: string;
+      tabId: string;
+      targetSessionId: string;
+      targetGroupId: string | null;
+      targetBeforeTabId?: string | null;
+    }
+  | {
       type: 'bok/rename-tab';
       sessionId: string;
       groupId: string;
@@ -172,6 +180,16 @@ export function isSavedPageCommand(value: unknown): value is SavedPageCommand {
       );
     case 'bok/remove-tab':
       return typeof command.tabId === 'string';
+    case 'bok/move-tab':
+      return (
+        typeof command.tabId === 'string' &&
+        typeof command.targetSessionId === 'string' &&
+        (command.targetGroupId === null ||
+          typeof command.targetGroupId === 'string') &&
+        (command.targetBeforeTabId === undefined ||
+          command.targetBeforeTabId === null ||
+          typeof command.targetBeforeTabId === 'string')
+      );
     case 'bok/rename-tab':
       return (
         hasGroupId(command) &&

@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
 } from 'react';
@@ -49,6 +50,21 @@ type ActionNotice = {
   type: 'success' | 'error';
   message: string;
   persistent?: boolean;
+};
+type TabMoveTarget = {
+  indicatorKey: string;
+  sessionId: string;
+  groupId: string | null;
+  targetBeforeTabId: string | null;
+  label: string;
+  indicator:
+    | { type: 'row'; tabId: string; edge: 'before' | 'after' }
+    | { type: 'container'; kind: 'session' | 'group'; id: string };
+};
+type DraggedTab = {
+  tab: SavedTab;
+  sourceSessionId: string;
+  sourceGroupId: string | null;
 };
 type TaskCounts = Record<TaskStatus, { sessions: number; groups: number; tabs: number }>;
 
@@ -426,6 +442,9 @@ export default function BokPage() {
   const [changingGroupId, setChangingGroupId] = useState('');
   const [changingSessionId, setChangingSessionId] = useState('');
   const [changingTabId, setChangingTabId] = useState('');
+  const [movingTabId, setMovingTabId] = useState('');
+  const [draggedTab, setDraggedTab] = useState<DraggedTab | null>(null);
+  const [dropTarget, setDropTarget] = useState<TabMoveTarget | null>(null);
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [openingBookmarkManager, setOpeningBookmarkManager] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState('');
@@ -1650,30 +1669,323 @@ export default function BokPage() {
     }
   }
 
+  function getContainerTabs(sessionId: string, groupId: string | null): SavedTab[] {
+    const session = sessionsById.get(sessionId);
+    if (!session) return [];
+    if (groupId === null) {
+      return session.items.flatMap((item) => item.type === 'tab' ? [item.tab] : []);
+    }
+    const group = session.items.find(
+      (item): item is Extract<ManagedSessionItem, { type: 'group' }> =>
+        item.type === 'group' && item.group.id === groupId,
+    );
+    return group?.group.tabs ?? [];
+  }
+
+  function isNoOpMove(
+    source: DraggedTab,
+    targetSessionId: string,
+    targetGroupId: string | null,
+    targetBeforeTabId: string | null,
+  ): boolean {
+    if (
+      source.sourceSessionId !== targetSessionId ||
+      source.sourceGroupId !== targetGroupId
+    ) {
+      return false;
+    }
+
+    const tabs = getContainerTabs(targetSessionId, targetGroupId);
+    const sourceIndex = tabs.findIndex((tab) => tab.id === source.tab.id);
+    if (sourceIndex < 0) return false;
+    const remainingTabs = tabs.filter((tab) => tab.id !== source.tab.id);
+    const targetIndex = targetBeforeTabId === null
+      ? remainingTabs.length
+      : remainingTabs.findIndex((tab) => tab.id === targetBeforeTabId);
+    return targetIndex === sourceIndex;
+  }
+
+  function getTargetLabel(sessionId: string, groupId: string | null): string {
+    const session = sessionsById.get(sessionId);
+    if (!session) return '保存记录';
+    if (groupId === null) return `保存记录“${getSessionTitle(session)}”`;
+    const group = session.items.find(
+      (item): item is Extract<ManagedSessionItem, { type: 'group' }> =>
+        item.type === 'group' && item.group.id === groupId,
+    );
+    return group ? `标签组“${getGroupTitle(group.group)}”` : '标签组';
+  }
+
+  function createMoveTarget(
+    source: DraggedTab,
+    targetSessionId: string,
+    targetGroupId: string | null,
+    targetBeforeTabId: string | null,
+    indicator: TabMoveTarget['indicator'],
+  ): TabMoveTarget | null {
+    const targetSession = sessionsById.get(targetSessionId);
+    if (!targetSession || targetSession.archivedAt !== null) return null;
+    if (targetGroupId !== null) {
+      const targetGroup = targetSession.items.find(
+        (item): item is Extract<ManagedSessionItem, { type: 'group' }> =>
+          item.type === 'group' && item.group.id === targetGroupId,
+      );
+      if (!targetGroup || targetGroup.group.archivedAt !== null) return null;
+    }
+    if (isNoOpMove(source, targetSessionId, targetGroupId, targetBeforeTabId)) {
+      return null;
+    }
+
+    const key = JSON.stringify([targetSessionId, targetGroupId, targetBeforeTabId]);
+    const indicatorKey = indicator.type === 'row'
+      ? `${key}:${indicator.tabId}:${indicator.edge}`
+      : `${key}:${indicator.kind}:${indicator.id}`;
+    return {
+      indicatorKey,
+      sessionId: targetSessionId,
+      groupId: targetGroupId,
+      targetBeforeTabId,
+      label: getTargetLabel(targetSessionId, targetGroupId),
+      indicator,
+    };
+  }
+
+  function getAppendMoveTarget(
+    source: DraggedTab,
+    targetSessionId: string,
+    targetGroupId: string | null,
+    kind: 'session' | 'group',
+    id: string,
+  ): TabMoveTarget | null {
+    return createMoveTarget(
+      source,
+      targetSessionId,
+      targetGroupId,
+      null,
+      { type: 'container', kind, id },
+    );
+  }
+
+  function getRowMoveTarget(
+    event: ReactDragEvent<HTMLElement>,
+    targetTab: SavedTab,
+    targetSessionId: string,
+    targetGroupId: string | null,
+  ): TabMoveTarget | null {
+    if (!draggedTab || draggedTab.tab.id === targetTab.id) return null;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const edge = event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+    const destinationTabs = getContainerTabs(targetSessionId, targetGroupId).filter(
+      (tab) => tab.id !== draggedTab.tab.id,
+    );
+    const hoveredIndex = destinationTabs.findIndex((tab) => tab.id === targetTab.id);
+    if (hoveredIndex < 0) return null;
+    const targetBeforeTabId = edge === 'before'
+      ? targetTab.id
+      : destinationTabs[hoveredIndex + 1]?.id ?? null;
+    return createMoveTarget(
+      draggedTab,
+      targetSessionId,
+      targetGroupId,
+      targetBeforeTabId,
+      { type: 'row', tabId: targetTab.id, edge },
+    );
+  }
+
+  async function moveSavedTab(source: DraggedTab, target: TabMoveTarget) {
+    if (
+      movingTabId ||
+      isNoOpMove(
+        source,
+        target.sessionId,
+        target.groupId,
+        target.targetBeforeTabId,
+      )
+    ) {
+      return;
+    }
+
+    setMovingTabId(source.tab.id);
+    setDraggedTab(null);
+    setDropTarget(null);
+    try {
+      await runCommand({
+        type: 'bok/move-tab',
+        sessionId: source.sourceSessionId,
+        tabId: source.tab.id,
+        targetSessionId: target.sessionId,
+        targetGroupId: target.groupId,
+        targetBeforeTabId: target.targetBeforeTabId,
+      });
+      setActionNotice({
+        type: 'success',
+        message: `已将“${source.tab.title}”移到${target.label}`,
+      });
+    } catch (error) {
+      showCommandError('移动标签', error);
+    } finally {
+      setMovingTabId('');
+    }
+  }
+
+  function startTabDrag(
+    event: ReactDragEvent<HTMLElement>,
+    source: DraggedTab,
+  ) {
+    if (movingTabId) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', source.tab.id);
+    const preview = document.createElement('div');
+    preview.className = 'tab-drag-preview';
+    preview.setAttribute('aria-hidden', 'true');
+
+    const favicon = document.createElement('span');
+    favicon.className = 'tab-drag-preview__favicon';
+    favicon.textContent = getFaviconFallback(source.tab.url);
+
+    const copy = document.createElement('span');
+    copy.className = 'tab-drag-preview__copy';
+    const title = document.createElement('strong');
+    title.textContent = source.tab.title;
+    const url = document.createElement('span');
+    url.textContent = getDisplayUrl(source.tab.url);
+    copy.append(title, url);
+    preview.append(favicon, copy);
+    document.body.append(preview);
+    event.dataTransfer.setDragImage(preview, 22, preview.offsetHeight / 2);
+    window.setTimeout(() => preview.remove(), 0);
+
+    setDraggedTab(source);
+    setDropTarget(null);
+  }
+
+  function finishTabDrag() {
+    setDraggedTab(null);
+    setDropTarget(null);
+  }
+
+  function allowTabDrop(
+    event: ReactDragEvent<HTMLElement>,
+    target: TabMoveTarget,
+  ) {
+    if (!draggedTab || movingTabId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    setDropTarget((current) =>
+      current?.indicatorKey === target.indicatorKey ? current : target,
+    );
+  }
+
+  function leaveTabDropTarget(
+    event: ReactDragEvent<HTMLElement>,
+    targetIndicatorKey: string,
+  ) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setDropTarget((current) =>
+      current?.indicatorKey === targetIndicatorKey ? null : current,
+    );
+  }
+
+  function dropTab(
+    event: ReactDragEvent<HTMLElement>,
+    target: TabMoveTarget,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!draggedTab) return;
+    void moveSavedTab(draggedTab, target);
+  }
+
   function renderTabRow(
     tab: SavedTab,
     location: {
       sessionId: string;
       groupId: string;
+      sourceGroupId: string | null;
       locked: boolean;
+      canMove: boolean;
       lockOwner?: '组' | '保存记录';
       directItem?: Extract<ManagedSessionItem, { type: 'tab' }>;
     },
   ) {
     const Row = location.directItem ? 'div' : 'li';
     const lockOwner = location.lockOwner ?? '组';
+    const canMove = location.canMove && movingTabId !== tab.id;
+    const source = {
+      tab,
+      sourceSessionId: location.sessionId,
+      sourceGroupId: location.sourceGroupId,
+    };
+    const rowDropIndicator =
+      dropTarget?.indicator.type === 'row' && dropTarget.indicator.tabId === tab.id
+        ? dropTarget.indicator.edge
+        : undefined;
     return (
       <Row
         key={tab.id}
-        className={`tab-row${tab.taskStatus ? ' tab-row--task' : ''}`}
+        className={`tab-row${tab.taskStatus ? ' tab-row--task' : ''}${
+          draggedTab?.tab.id === tab.id ? ' tab-row--dragging' : ''
+        }`}
+        data-tab-id={tab.id}
+        data-drop-position={rowDropIndicator}
         data-task-status={tab.taskStatus ?? undefined}
+        aria-busy={movingTabId === tab.id || undefined}
+        onDragEnter={(event) => {
+          const target = getRowMoveTarget(
+            event,
+            tab,
+            location.sessionId,
+            location.sourceGroupId,
+          );
+          if (target) allowTabDrop(event, target);
+        }}
+        onDragOver={(event) => {
+          const target = getRowMoveTarget(
+            event,
+            tab,
+            location.sessionId,
+            location.sourceGroupId,
+          );
+          if (target) allowTabDrop(event, target);
+          else if (
+            dropTarget?.indicator.type === 'row' &&
+            dropTarget.indicator.tabId === tab.id
+          ) {
+            setDropTarget(null);
+          }
+        }}
+        onDragLeave={(event) => {
+          if (
+            dropTarget?.indicator.type === 'row' &&
+            dropTarget.indicator.tabId === tab.id
+          ) {
+            leaveTabDropTarget(event, dropTarget.indicatorKey);
+          }
+        }}
+        onDrop={(event) => {
+          const target = getRowMoveTarget(
+            event,
+            tab,
+            location.sessionId,
+            location.sourceGroupId,
+          );
+          if (target) dropTab(event, target);
+        }}
       >
         <a
           className="tab-row__link"
           href={tab.url}
           target="_blank"
           rel="noreferrer"
+          draggable={canMove}
           aria-label={`在新标签页打开链接：${tab.title}`}
+          onDragStart={(event) => startTabDrag(event, source)}
+          onDragEnd={finishTabDrag}
           onClick={(event) => openChromeUrl(event, tab.url)}
         />
         <Favicon tab={tab} />
@@ -1772,9 +2084,32 @@ export default function BokPage() {
     const deleteBlockedMessage = session.locked
       ? '保存记录已锁定，无法删除'
       : '保存记录中有已锁定标签组，请先解锁后再删除';
+    const appendTarget = draggedTab
+      ? getAppendMoveTarget(draggedTab, session.id, null, 'session', session.id)
+      : null;
+    const dropActive = Boolean(
+      dropTarget?.indicator.type === 'container' &&
+      dropTarget.indicator.kind === 'session' &&
+      dropTarget.indicator.id === session.id,
+    );
 
     return (
-      <header className="saved-session__header">
+      <header
+        className="saved-session__header"
+        data-drop-active={dropActive || undefined}
+        onDragEnter={(event) => {
+          if (appendTarget) allowTabDrop(event, appendTarget);
+        }}
+        onDragOver={(event) => {
+          if (appendTarget) allowTabDrop(event, appendTarget);
+        }}
+        onDragLeave={(event) => {
+          if (appendTarget) leaveTabDropTarget(event, appendTarget.indicatorKey);
+        }}
+        onDrop={(event) => {
+          if (appendTarget) dropTab(event, appendTarget);
+        }}
+      >
         <div className="saved-session__summary">
           <h2 id={`session-title-${session.id}`}>
             {editingSessionId === session.id ? (
@@ -2258,7 +2593,13 @@ export default function BokPage() {
                       {renderTabRow(item.tab, {
                         sessionId: item.sessionId,
                         groupId: item.groupId,
+                        sourceGroupId: null,
                         locked: fullSession.locked,
+                        canMove:
+                          archiveView === 'current' &&
+                          fullSession.archivedAt === null &&
+                          item.tab.archivedAt === null &&
+                          !fullSession.locked,
                         lockOwner: '保存记录',
                         directItem: item,
                       })}
@@ -2286,6 +2627,35 @@ export default function BokPage() {
                 };
                 const defaultOpenTitle = '以浏览器标签组形式打开全部标签';
                 const groupChanging = changingGroupId === group.id;
+                const groupAppendTarget = draggedTab
+                  ? getAppendMoveTarget(
+                      draggedTab,
+                      group.sessionId,
+                      group.id,
+                      'group',
+                      group.id,
+                    )
+                  : null;
+                const sessionAppendTarget = isMergedGroup && draggedTab
+                  ? getAppendMoveTarget(
+                      draggedTab,
+                      fullSession.id,
+                      null,
+                      'session',
+                      fullSession.id,
+                    )
+                  : null;
+                const groupDropActive = Boolean(
+                  dropTarget?.indicator.type === 'container' &&
+                  dropTarget.indicator.kind === 'group' &&
+                  dropTarget.indicator.id === group.id,
+                );
+                const sessionDirectDropActive = Boolean(
+                  isMergedGroup &&
+                  dropTarget?.indicator.type === 'container' &&
+                  dropTarget.indicator.kind === 'session' &&
+                  dropTarget.indicator.id === fullSession.id,
+                );
                 const displayedCreatedAt = isMergedGroup
                   ? fullSession.createdAt
                   : group.createdAt;
@@ -2314,7 +2684,24 @@ export default function BokPage() {
                     data-group-color={group.color ?? 'grey'}
                     aria-labelledby={`group-title-${group.id}`}
                   >
-                    <header className="tab-group__header">
+                    <header
+                      className="tab-group__header"
+                      data-drop-active={groupDropActive || undefined}
+                      onDragEnter={(event) => {
+                        if (groupAppendTarget) allowTabDrop(event, groupAppendTarget);
+                      }}
+                      onDragOver={(event) => {
+                        if (groupAppendTarget) allowTabDrop(event, groupAppendTarget);
+                      }}
+                      onDragLeave={(event) => {
+                        if (groupAppendTarget) {
+                          leaveTabDropTarget(event, groupAppendTarget.indicatorKey);
+                        }
+                      }}
+                      onDrop={(event) => {
+                        if (groupAppendTarget) dropTab(event, groupAppendTarget);
+                      }}
+                    >
                       <span
                         className="tab-group__kind"
                         role="img"
@@ -2375,6 +2762,21 @@ export default function BokPage() {
                         {group.locked && <span>已锁定</span>}
                         {group.taskStatus && <TaskBadge status={group.taskStatus} />}
                       </div>
+
+                      {sessionAppendTarget && (
+                        <span
+                          className="session-direct-drop-target"
+                          data-drop-active={sessionDirectDropActive || undefined}
+                          onDragEnter={(event) => allowTabDrop(event, sessionAppendTarget)}
+                          onDragOver={(event) => allowTabDrop(event, sessionAppendTarget)}
+                          onDragLeave={(event) =>
+                            leaveTabDropTarget(event, sessionAppendTarget.indicatorKey)
+                          }
+                          onDrop={(event) => dropTab(event, sessionAppendTarget)}
+                        >
+                          移到保存记录
+                        </span>
+                      )}
 
                       <div className="tab-group__actions">
                         {group.archivedAt === null && (
@@ -2634,7 +3036,14 @@ export default function BokPage() {
                           renderTabRow(tab, {
                             sessionId: group.sessionId,
                             groupId: group.id,
+                            sourceGroupId: group.id,
                             locked: group.locked,
+                            canMove:
+                              archiveView === 'current' &&
+                              fullSession.archivedAt === null &&
+                              group.archivedAt === null &&
+                              !fullSession.locked &&
+                              !group.locked,
                           }),
                         )}
                       </ol>

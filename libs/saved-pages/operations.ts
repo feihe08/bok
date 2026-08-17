@@ -13,6 +13,7 @@ import {
   deduplicateGroup,
   getSavedGroup,
   getSavedSession,
+  moveTab,
   removeGroup,
   removeSession,
   removeTab,
@@ -29,12 +30,13 @@ import {
   setSessionTaskStatus,
   setTabTaskStatus,
 } from './store';
-import { importSessionsJson } from './persistence';
+import { getSessions, importSessionsJson, writeSessions } from './persistence';
 import {
   bindOpenedTaskGroup,
   bindOpenedTaskGroups,
   clearTaskGroupBinding,
   clearTaskGroupBindingsForSession,
+  detachMovedTaskTabBinding,
   focusTaskGroupBinding,
   getActiveTaskGroupBindings,
   ignoreMissingTaskGroupTabs,
@@ -161,6 +163,41 @@ export async function executeSavedPageCommand(
       await removeTab(command.sessionId, command.tabId);
       await ignoreTaskTab(command.sessionId, command.tabId);
       return null;
+    case 'bok/move-tab': {
+      const previousSessions = structuredClone(await getSessions());
+      const result = await moveTab(
+        command.sessionId,
+        command.tabId,
+        command.targetSessionId,
+        command.targetGroupId,
+        command.targetBeforeTabId ?? null,
+      );
+      if (!result.moved) return null;
+      if (!result.containerChanged) return null;
+      try {
+        await detachMovedTaskTabBinding(
+          result.sourceSessionId,
+          result.sourceGroupId,
+          command.tabId,
+          result.removedSourceGroup,
+        );
+      } catch (error) {
+        try {
+          await writeSessions(previousSessions);
+        } catch (rollbackError) {
+          const reason = error instanceof Error ? error.message : String(error);
+          const rollbackReason = rollbackError instanceof Error
+            ? rollbackError.message
+            : String(rollbackError);
+          throw new Error(
+            `移动标签后无法更新同步状态：${reason}；回滚保存记录失败：${rollbackReason}`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      return null;
+    }
     case 'bok/rename-tab':
       await renameTab(
         command.sessionId,
