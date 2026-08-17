@@ -416,6 +416,16 @@ Chrome 书签管理直接以 Chrome Bookmarks API 返回的书签栏为事实来
 `SavedTab.tags`、`SavedTab.directory` 或 `sessions`。保存网页与 Chrome 书签是两个
 独立一级能力。
 
+`browser.storage.local.defaultBookmarkFolderId` 保存当前 Chrome 资料中用户选择的默认书签
+目录节点 ID。设置页只列出书签栏及其子文件夹；该字段不进入 `bok-settings.json`，也不随
+设置备份迁移。旧数据缺少此字段时继续使用书签栏一级目录 `Inbox`，无需迁移或补写字段。
+已配置目录被删除或移出书签栏后，Bok 不回退到其他目录，设置页会要求用户重新选择。
+
+用户在 Chrome 中新建书签或修改新书签所在目录后，Bok 将已配置目录标记为最近修改的
+文件夹，使下一次使用 Chrome 原生书签保存入口时默认选择该目录。此行为不会移动用户
+刚保存的书签；找不到有效目录时不创建目录，也不修改书签位置。Bok 通过在目标目录中
+创建并立即删除一个扩展内部标记完成这项更新；标记不会保留在书签树中。
+
 用户明确归档文件夹时，Bok 把完整文件夹树写入
 `browser.storage.local.bookmarkArchiveStore`。归档记录只保存文件夹名称、书签标题、
 完整 URL、层级、顺序、原父目录提示和事务状态；不保存 favicon、最后访问时间，也不把

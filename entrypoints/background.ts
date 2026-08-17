@@ -7,6 +7,12 @@ import {
   isBookmarkBackupCommand,
   runBookmarkBackup,
 } from '../libs/backup/backup';
+import {
+  cleanupDefaultBookmarkFolderMarkers,
+  isDefaultFolderMarker,
+  markDefaultBookmarkFolderAsMostRecentlyModified,
+} from '../libs/bookmarks/default-folder';
+import type { BookmarkNode } from '../libs/bookmarks/model';
 import type {
   BookmarkBackupResponse,
   ImportDataResponse,
@@ -41,6 +47,7 @@ const AUTO_ARCHIVE_ALARM = 'bok-auto-archive';
 const AUTO_ARCHIVE_INTERVAL_MINUTES = 60;
 const TASK_GROUP_RECONCILE_DEBOUNCE_MS = 120;
 const GROUP_BINDING_RESTORE_DEBOUNCE_MS = 750;
+const BOOKMARK_DEFAULT_FOLDER_DEBOUNCE_MS = 250;
 const OPEN_BOK_MENU_ID = 'bok/open';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
 const SAVE_TAB_MENU_ID = 'bok/save-tab';
@@ -98,6 +105,7 @@ let operationQueue = Promise.resolve();
 let contextMenuQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
 let groupBindingRestoreTimer: ReturnType<typeof setTimeout> | undefined;
+let bookmarkDefaultFolderTimer: ReturnType<typeof setTimeout> | undefined;
 const pendingTaskGroupAdoptionIds = new Set<number>();
 const pendingTaskGroupIds = new Set<number>();
 const pendingTaskTabIds = new Set<number>();
@@ -109,6 +117,74 @@ function enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return task;
+}
+
+function scheduleBookmarkDefaultFolderReset(): void {
+  if (bookmarkDefaultFolderTimer !== undefined) {
+    clearTimeout(bookmarkDefaultFolderTimer);
+  }
+  bookmarkDefaultFolderTimer = setTimeout(() => {
+    bookmarkDefaultFolderTimer = undefined;
+    void markDefaultBookmarkFolderAsMostRecentlyModified()
+      .then((updated) => {
+        if (!updated) {
+          console.warn('[bok] cannot set the next bookmark folder: configured folder was not found');
+        }
+      })
+      .catch((error) => {
+        console.error('[bok] failed to set the next bookmark folder', error);
+      });
+  }, BOOKMARK_DEFAULT_FOLDER_DEBOUNCE_MS);
+}
+
+function handleBookmarkCreated(_id: string, node: BookmarkNode): void {
+  if (node.url == null || isDefaultFolderMarker(node)) return;
+  scheduleBookmarkDefaultFolderReset();
+}
+
+function handleBookmarkMoved(id: string): void {
+  void browser.bookmarks
+    .get(id)
+    .then(([node]) => {
+      if (node?.url != null) scheduleBookmarkDefaultFolderReset();
+    })
+    .catch(() => undefined);
+}
+
+export function registerBookmarkDefaultFolderListeners(): boolean {
+  const bookmarksApi = browser.bookmarks;
+  if (!bookmarksApi?.onCreated || !bookmarksApi.onMoved) return false;
+  try {
+    bookmarksApi.onCreated.removeListener(handleBookmarkCreated);
+    bookmarksApi.onMoved.removeListener(handleBookmarkMoved);
+    bookmarksApi.onCreated.addListener(handleBookmarkCreated);
+    bookmarksApi.onMoved.addListener(handleBookmarkMoved);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function unregisterBookmarkDefaultFolderListeners(): void {
+  const bookmarksApi = browser.bookmarks;
+  if (!bookmarksApi?.onCreated || !bookmarksApi.onMoved) return;
+  try {
+    bookmarksApi.onCreated.removeListener(handleBookmarkCreated);
+    bookmarksApi.onMoved.removeListener(handleBookmarkMoved);
+  } catch {
+    // Optional Bookmarks API may disappear immediately after permission removal.
+  }
+}
+
+export async function recoverDefaultBookmarkFolderMarkers(): Promise<boolean> {
+  const canReadBookmarks = await browser.permissions.contains({
+    permissions: ['bookmarks'],
+  });
+  if (!canReadBookmarks || !browser.bookmarks) return false;
+  const removedMarkers = await cleanupDefaultBookmarkFolderMarkers();
+  return removedMarkers === 0
+    ? true
+    : markDefaultBookmarkFolderAsMostRecentlyModified();
 }
 
 async function ensureAutoArchiveAlarm(): Promise<void> {
@@ -317,6 +393,11 @@ function scheduleGroupBindingRestore(): void {
 }
 
 export default defineBackground(() => {
+  registerBookmarkDefaultFolderListeners();
+  void recoverDefaultBookmarkFolderMarkers().catch((error) => {
+    console.error('[bok] failed to recover bookmark default folder markers', error);
+  });
+
   browser.runtime.onInstalled.addListener(() => {
     void queueContextMenuRefresh().catch((error) => {
       console.error('[bok] failed to install context menus', error);
@@ -389,6 +470,21 @@ export default defineBackground(() => {
 
   browser.tabs.onMoved.addListener((tabId) => {
     scheduleTaskTabReconcile(tabId);
+  });
+
+  browser.permissions.onAdded.addListener((permissions) => {
+    if (permissions.permissions?.includes('bookmarks')) {
+      registerBookmarkDefaultFolderListeners();
+      void recoverDefaultBookmarkFolderMarkers().catch((error) => {
+        console.error('[bok] failed to recover bookmark default folder markers', error);
+      });
+    }
+  });
+
+  browser.permissions.onRemoved.addListener((permissions) => {
+    if (permissions.permissions?.includes('bookmarks')) {
+      unregisterBookmarkDefaultFolderListeners();
+    }
   });
 
   browser.windows.onFocusChanged.addListener((windowId) => {

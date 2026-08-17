@@ -32,11 +32,22 @@ import {
   SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY,
   THEME_PREFERENCE_KEY,
 } from '../../libs/saved-pages/settings';
+import {
+  getDefaultBookmarkFolderSettings,
+  markDefaultBookmarkFolderAsMostRecentlyModified,
+  setDefaultBookmarkFolderId,
+  type DefaultBookmarkFolderSettings,
+} from '../../libs/bookmarks/default-folder';
 
 type Theme = 'light' | 'dark';
 type DirectoryPermission = 'granted' | 'denied' | 'prompt' | 'missing';
 type Notice = { type: 'success' | 'error'; message: string };
-type SettingsSection = 'machine' | 'saved-pages' | 'backup' | 'import';
+type SettingsSection =
+  | 'machine'
+  | 'bookmarks'
+  | 'saved-pages'
+  | 'backup'
+  | 'import';
 
 const THEME_STORAGE_KEY = 'bok-theme';
 const BACKUP_DEVICE_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
@@ -56,11 +67,19 @@ function getSettingsSection(): SettingsSection {
   if (window.location.hash === '#import-settings') return 'import';
   if (window.location.hash === '#backup-settings') return 'backup';
   if (window.location.hash === '#saved-pages-settings') return 'saved-pages';
+  if (window.location.hash === '#bookmark-settings') return 'bookmarks';
   return 'machine';
 }
 
 const storedTheme = getStoredTheme();
 if (storedTheme) document.documentElement.dataset.theme = storedTheme;
+
+const EMPTY_BOOKMARK_FOLDER_SETTINGS: DefaultBookmarkFolderSettings = {
+  configuredFolderId: null,
+  selectedFolderId: null,
+  missingConfiguredFolder: false,
+  options: [],
+};
 
 function formatBackupTime(timestamp: number | null): string {
   if (timestamp == null) return '尚未成功备份';
@@ -133,6 +152,8 @@ export default function SettingsPage() {
   const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
   const [autoArchivePeriod, setAutoArchivePeriod] =
     useState<SavedPagesAutoArchivePeriod>(7);
+  const [bookmarkFolderSettings, setBookmarkFolderSettings] =
+    useState<DefaultBookmarkFolderSettings>(EMPTY_BOOKMARK_FOLDER_SETTINGS);
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(getSettingsSection);
   const [backupDeviceName, setBackupDeviceName] = useState('personal');
@@ -158,10 +179,14 @@ export default function SettingsPage() {
         browser.permissions.contains({ permissions: ['bookmarks'] }),
         getSavedPagesAutoArchivePeriod(),
       ]);
+    const nextBookmarkFolderSettings = canReadBookmarks
+      ? await getDefaultBookmarkFolderSettings()
+      : EMPTY_BOOKMARK_FOLDER_SETTINGS;
     setState(nextState);
     setDirectoryPermission(nextDirectoryPermission);
     setBookmarksPermission(canReadBookmarks);
     setAutoArchivePeriod(nextAutoArchivePeriod);
+    setBookmarkFolderSettings(nextBookmarkFolderSettings);
   }, []);
 
   useEffect(() => {
@@ -280,6 +305,32 @@ export default function SettingsPage() {
       setNotice({
         type: 'error',
         message: `自动归档设置保存失败：${error instanceof Error ? error.message : '请重试'}`,
+      });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function changeDefaultBookmarkFolder(
+    event: ChangeEvent<HTMLSelectElement>,
+  ) {
+    const folderId = event.currentTarget.value;
+    if (!folderId || busy) return;
+
+    setBusy('bookmark-folder');
+    setNotice(null);
+    try {
+      await setDefaultBookmarkFolderId(folderId);
+      if (!(await markDefaultBookmarkFolderAsMostRecentlyModified())) {
+        throw new Error('目录已保存，但现在无法找到，请重新选择');
+      }
+      await refresh();
+      setNotice({ type: 'success', message: '默认书签目录已保存。' });
+    } catch (error) {
+      await refresh();
+      setNotice({
+        type: 'error',
+        message: `默认书签目录保存失败：${error instanceof Error ? error.message : '请重试'}`,
       });
     } finally {
       setBusy('');
@@ -578,6 +629,12 @@ export default function SettingsPage() {
               机器
             </a>
             <a
+              href="#bookmark-settings"
+              aria-current={activeSection === 'bookmarks' ? 'location' : undefined}
+            >
+              书签
+            </a>
+            <a
               href="#saved-pages-settings"
               aria-current={activeSection === 'saved-pages' ? 'location' : undefined}
             >
@@ -601,7 +658,7 @@ export default function SettingsPage() {
         <main id="settings-content" className="settings-content" tabIndex={-1}>
           <header className="settings-header">
             <h1>设置</h1>
-            <p>管理机器名称、Bok 已保存网页和本地备份。</p>
+            <p>管理机器名称、书签、Bok 已保存网页和本地备份。</p>
           </header>
 
           <section
@@ -704,6 +761,97 @@ export default function SettingsPage() {
           </section>
 
           <section
+            id="bookmark-settings"
+            className="settings-section"
+            aria-labelledby="bookmark-heading"
+          >
+            <div className="settings-section__heading">
+              <h2 id="bookmark-heading">书签</h2>
+              <p>设置 Chrome 原生书签保存入口下次默认选择的目录。</p>
+            </div>
+
+            {!bookmarksPermission && (
+              <div className="settings-permission">
+                <div>
+                  <strong>允许访问 Chrome 书签栏</strong>
+                  <p>用于选择默认保存目录和生成书签栏备份文件。</p>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={Boolean(busy)}
+                  onClick={() => void grantBookmarksPermission()}
+                >
+                  {busy === 'bookmarks' ? '请求中…' : '允许访问'}
+                </button>
+              </div>
+            )}
+
+            <dl className="settings-list">
+              <div className="settings-row">
+                <dt>
+                  <label htmlFor="default-bookmark-folder">默认保存目录</label>
+                </dt>
+                <dd>
+                  <div className="settings-select-control">
+                    <select
+                      id="default-bookmark-folder"
+                      className="settings-select"
+                      value={
+                        bookmarkFolderSettings.missingConfiguredFolder
+                          ? bookmarkFolderSettings.configuredFolderId ?? ''
+                          : bookmarkFolderSettings.selectedFolderId ?? ''
+                      }
+                      disabled={
+                        Boolean(busy) ||
+                        !bookmarksPermission ||
+                        bookmarkFolderSettings.options.length === 0
+                      }
+                      aria-invalid={
+                        bookmarkFolderSettings.missingConfiguredFolder || undefined
+                      }
+                      aria-describedby="default-bookmark-folder-help"
+                      onChange={(event) => void changeDefaultBookmarkFolder(event)}
+                    >
+                      {!bookmarksPermission && <option value="">需要书签权限</option>}
+                      {bookmarksPermission &&
+                        bookmarkFolderSettings.missingConfiguredFolder && (
+                          <option
+                            value={bookmarkFolderSettings.configuredFolderId ?? ''}
+                            disabled
+                          >
+                            原目录已不存在
+                          </option>
+                        )}
+                      {bookmarksPermission &&
+                        !bookmarkFolderSettings.missingConfiguredFolder &&
+                        bookmarkFolderSettings.selectedFolderId == null && (
+                          <option value="" disabled>
+                            未找到 Inbox，请选择
+                          </option>
+                        )}
+                      {bookmarkFolderSettings.options.map((folder) => (
+                        <option key={folder.id} value={folder.id}>
+                          {folder.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p id="default-bookmark-folder-help">
+                      {!bookmarksPermission
+                        ? '允许书签访问后，可选择书签栏及其子文件夹。'
+                        : bookmarkFolderSettings.missingConfiguredFolder
+                          ? '原目录已删除或移出书签栏，请重新选择。'
+                          : bookmarkFolderSettings.configuredFolderId == null
+                            ? '当前沿用 Inbox；选择后只在当前 Chrome 资料中生效。'
+                            : '只在当前 Chrome 资料中生效，不随设置备份迁移。'}
+                    </p>
+                  </div>
+                </dd>
+              </div>
+            </dl>
+          </section>
+
+          <section
             id="saved-pages-settings"
             className="settings-section"
             aria-labelledby="saved-pages-heading"
@@ -753,24 +901,7 @@ export default function SettingsPage() {
               <p>备份文件保存在你选择的文件夹，不会上传到 Bok 的服务器。</p>
             </div>
 
-          {!bookmarksPermission && (
-            <div className="settings-permission">
-              <div>
-                <strong>允许读取 Chrome 书签栏</strong>
-                <p>只用于生成书签栏备份文件。</p>
-              </div>
-              <button
-                type="button"
-                className="secondary-button"
-                disabled={Boolean(busy)}
-                onClick={() => void grantBookmarksPermission()}
-              >
-                {busy === 'bookmarks' ? '请求中…' : '允许访问'}
-              </button>
-            </div>
-          )}
-
-          <dl className="settings-list">
+            <dl className="settings-list">
             <div className="settings-row">
               <dt>备份文件夹</dt>
               <dd>
