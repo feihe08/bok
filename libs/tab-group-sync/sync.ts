@@ -312,6 +312,21 @@ export async function getActiveTaskGroupBindings(
   return active;
 }
 
+export async function getBoundSavedGroupForTab(
+  browserTabId: number,
+): Promise<{ sessionId: string; groupId: string } | null> {
+  const matches = Object.values(await getBindings()).filter(
+    (binding) =>
+      binding.savedTabIdByBrowserTabId[String(browserTabId)] !== undefined,
+  );
+  return matches.length === 1
+    ? {
+        sessionId: matches[0].sessionId,
+        groupId: matches[0].savedGroupId,
+      }
+    : null;
+}
+
 export async function updateBoundGroupTitle(
   sessionId: string,
   savedGroupId: string,

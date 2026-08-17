@@ -14,6 +14,7 @@ import type {
 import {
   openOrFocusSavedPage,
   saveAndCloseTab,
+  saveAndCloseTabToGroup,
   saveAndCloseTabGroup,
   saveAndCloseTabs,
 } from '../libs/saved-pages/save-tabs';
@@ -21,6 +22,8 @@ import { executeSavedPageCommand } from '../libs/saved-pages/operations';
 import {
   archiveEligibleGroups,
   ensureUniqueGroupedTitles,
+  getUnarchivedSavedGroupTargets,
+  type SavedGroupTarget,
 } from '../libs/saved-pages/store';
 import {
   adoptMovedTaskGroup,
@@ -42,6 +45,7 @@ const OPEN_BOK_MENU_ID = 'bok/open';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
 const SAVE_TAB_MENU_ID = 'bok/save-tab';
 const SAVE_GROUP_MENU_ID = 'bok/save-group';
+const SAVE_TAB_TO_GROUP_MENU_ID = 'bok/save-tab-to-group';
 const PAGE_CONTEXT_MENU_ID = 'bok/page';
 const PAGE_CONTEXTS = [
   'page',
@@ -75,7 +79,23 @@ function normalizeContextMenuId(menuId: string): string {
     : menuId;
 }
 
+function saveTabToGroupMenuId(target: SavedGroupTarget): string {
+  return `${SAVE_TAB_TO_GROUP_MENU_ID}/${target.sessionId}/${target.groupId}`;
+}
+
+function parseSaveTabToGroupMenuId(
+  menuId: string,
+): { sessionId: string; groupId: string } | null {
+  const prefix = `${SAVE_TAB_TO_GROUP_MENU_ID}/`;
+  if (!menuId.startsWith(prefix)) return null;
+  const parts = menuId.slice(prefix.length).split('/');
+  return parts.length === 2 && parts[0] && parts[1]
+    ? { sessionId: parts[0], groupId: parts[1] }
+    : null;
+}
+
 let operationQueue = Promise.resolve();
+let contextMenuQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
 let groupBindingRestoreTimer: ReturnType<typeof setTimeout> | undefined;
 const pendingTaskGroupAdoptionIds = new Set<number>();
@@ -132,10 +152,10 @@ function isBokPageUrl(url: string | undefined): boolean {
 }
 
 async function installContextMenus(): Promise<void> {
-  const [activeTab] = await browser.tabs.query({
-    active: true,
-    lastFocusedWindow: true,
-  });
+  const [[activeTab], groupTargets] = await Promise.all([
+    browser.tabs.query({ active: true, lastFocusedWindow: true }),
+    getUnarchivedSavedGroupTargets(),
+  ]);
   const saveGroupEnabled =
     activeTab?.groupId != null && activeTab.groupId !== -1;
   await browser.contextMenus.removeAll();
@@ -146,6 +166,7 @@ async function installContextMenus(): Promise<void> {
       enabled: item.id !== SAVE_GROUP_MENU_ID || saveGroupEnabled,
     });
   }
+  createSaveTabToGroupMenu(groupTargets);
   browser.contextMenus.create({
     id: PAGE_CONTEXT_MENU_ID,
     title: 'Bok',
@@ -160,6 +181,55 @@ async function installContextMenus(): Promise<void> {
       enabled: item.id !== SAVE_GROUP_MENU_ID || saveGroupEnabled,
     });
   }
+  createSaveTabToGroupMenu(groupTargets, PAGE_CONTEXT_MENU_ID);
+}
+
+function createSaveTabToGroupMenu(
+  groupTargets: SavedGroupTarget[],
+  parentId?: string,
+): void {
+  const menuId = parentId
+    ? pageContextMenuId(SAVE_TAB_TO_GROUP_MENU_ID)
+    : SAVE_TAB_TO_GROUP_MENU_ID;
+  const contexts: [...typeof PAGE_CONTEXTS] | ['action'] = parentId
+    ? [...PAGE_CONTEXTS]
+    : ['action'];
+  browser.contextMenus.create({
+    id: menuId,
+    parentId,
+    title: '保存此标签到分组',
+    contexts,
+  });
+
+  if (groupTargets.length === 0) {
+    browser.contextMenus.create({
+      id: `${menuId}/empty`,
+      parentId: menuId,
+      title: '没有可用的未归档分组',
+      contexts,
+      enabled: false,
+    });
+    return;
+  }
+
+  for (const target of groupTargets) {
+    const targetMenuId = saveTabToGroupMenuId(target);
+    browser.contextMenus.create({
+      id: parentId ? pageContextMenuId(targetMenuId) : targetMenuId,
+      parentId: menuId,
+      title: target.title,
+      contexts,
+    });
+  }
+}
+
+function queueContextMenuRefresh(): Promise<void> {
+  const task = contextMenuQueue.then(installContextMenus);
+  contextMenuQueue = task.then(
+    () => undefined,
+    () => undefined,
+  );
+  return task;
 }
 
 async function refreshSaveGroupMenuState(): Promise<void> {
@@ -185,6 +255,14 @@ async function executeContextMenuCommand(
     return undefined;
   }
   if (tab?.id == null) throw new Error('找不到当前标签页');
+  const targetGroup = parseSaveTabToGroupMenuId(menuId);
+  if (targetGroup) {
+    return saveAndCloseTabToGroup(
+      tab.id,
+      targetGroup.sessionId,
+      targetGroup.groupId,
+    );
+  }
   if (menuId === SAVE_TAB_MENU_ID) return saveAndCloseTab(tab.id);
   if (menuId === SAVE_GROUP_MENU_ID) return saveAndCloseTabGroup(tab.id);
   if (tab.windowId == null) throw new Error('找不到当前窗口');
@@ -240,8 +318,15 @@ function scheduleGroupBindingRestore(): void {
 
 export default defineBackground(() => {
   browser.runtime.onInstalled.addListener(() => {
-    void installContextMenus().catch((error) => {
+    void queueContextMenuRefresh().catch((error) => {
       console.error('[bok] failed to install context menus', error);
+    });
+  });
+
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || changes.sessions === undefined) return;
+    void queueContextMenuRefresh().catch((error) => {
+      console.error('[bok] failed to refresh context menus', error);
     });
   });
 
@@ -363,7 +448,12 @@ export default defineBackground(() => {
 
   browser.contextMenus.onClicked.addListener((info, tab) => {
     const menuId = normalizeContextMenuId(String(info.menuItemId));
-    if (!CONTEXT_MENU_COMMAND_IDS.has(menuId)) return;
+    if (
+      !CONTEXT_MENU_COMMAND_IDS.has(menuId) &&
+      parseSaveTabToGroupMenuId(menuId) === null
+    ) {
+      return;
+    }
 
     void enqueueOperation(() => executeContextMenuCommand(menuId, tab)).then(
       (result) => {

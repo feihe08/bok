@@ -12,8 +12,10 @@ const {
   writeSessions,
 } = await import('../libs/saved-pages/persistence.ts');
 const {
+  appendTabsToGroup,
   deduplicateGroup,
   getSavedSession,
+  getUnarchivedSavedGroupTargets,
   removeGroup,
   removeSession,
   removeTab,
@@ -32,6 +34,7 @@ const {
   openSavedSession,
   rollbackOpenedSavedSession,
 } = await import('../libs/saved-pages/restore-tabs.ts');
+const { saveAndCloseTabToGroup } = await import('../libs/saved-pages/save-tabs.ts');
 const { executeSavedPageCommand } = await import('../libs/saved-pages/operations.ts');
 
 const tab = (id, url = `https://${id}.example`) => ({
@@ -123,6 +126,69 @@ await assert.rejects(
   /无法删除其中的标签页/,
 );
 await setSessionLocked('state-session', false);
+
+await writeSessions([
+  session('active-target-session', [
+    {
+      type: 'group',
+      group: group('active-target', [tab('existing-target-tab')], {
+        title: 'Active target',
+      }),
+    },
+    {
+      type: 'group',
+      group: {
+        ...group('archived-target', [tab('archived-target-tab')]),
+        archivedAt: 200,
+      },
+    },
+  ]),
+  session(
+    'archived-target-session',
+    [
+      {
+        type: 'group',
+        group: group('hidden-target', [tab('hidden-target-tab')]),
+      },
+    ],
+    { archivedAt: 200 },
+  ),
+]);
+assert.deepEqual(await getUnarchivedSavedGroupTargets(), [
+  {
+    sessionId: 'active-target-session',
+    groupId: 'active-target',
+    title: 'Active target',
+  },
+]);
+await appendTabsToGroup('active-target-session', 'active-target', [
+  tab('appended-target-tab'),
+]);
+assert.deepEqual(
+  (await getSavedSession('active-target-session')).items[0].group.tabs.map(
+    (item) => item.id,
+  ),
+  ['existing-target-tab', 'appended-target-tab'],
+);
+await assert.rejects(
+  () =>
+    appendTabsToGroup('active-target-session', 'archived-target', [
+      tab('rejected-archived-group-tab'),
+    ]),
+  /目标分组已归档/,
+);
+await assert.rejects(
+  () =>
+    appendTabsToGroup('archived-target-session', 'hidden-target', [
+      tab('rejected-archived-session-tab'),
+    ]),
+  /目标保存记录已归档/,
+);
+await assert.rejects(
+  () => appendTabsToGroup('active-target-session', 'missing-target', []),
+  /找不到要操作的分组/,
+);
+
 await writeSessions([
   session('locked-group-session', [
     {
@@ -453,6 +519,73 @@ assert.equal(reused.reusedSyncedGroup, true);
 assert.equal(focusedWindowId, 5);
 assert.equal(activatedTabId, 620);
 assert.equal(attemptedCreate, false);
+
+await writeSessions([
+  session('bound-source-session', [
+    {
+      type: 'group',
+      group: group('bound-source-group', [tab('bound-source-tab')]),
+    },
+  ]),
+  session('bound-target-session', [
+    {
+      type: 'group',
+      group: group('bound-target-group', [tab('bound-target-tab')]),
+    },
+  ]),
+]);
+await bindOpenedTaskGroups('bound-source-session', [
+  {
+    savedGroupId: 'bound-source-group',
+    browserGroupId: 80,
+    windowId: 5,
+    openedTabIdBySavedTabId: { 'bound-source-tab': 700 },
+  },
+]);
+const boundBrowserTab = {
+  id: 700,
+  index: 0,
+  windowId: 5,
+  groupId: 80,
+  url: 'https://bound-source-tab.example',
+  title: 'Bound source tab',
+};
+fakeBrowser.tabs.get = async () => boundBrowserTab;
+fakeBrowser.tabGroups.get = async (id) => ({
+  id,
+  windowId: 5,
+  title: 'bound-source-group',
+  color: 'grey',
+});
+fakeBrowser.tabGroups.query = async () => [
+  { id: 80, windowId: 5, title: 'bound-source-group', color: 'grey' },
+];
+fakeBrowser.tabs.query = async (query) => {
+  if (query.groupId === 80) return [boundBrowserTab];
+  if (query.windowId === 5) {
+    return [boundBrowserTab, { id: 701, index: 1, windowId: 5 }];
+  }
+  return [];
+};
+const removedBeforeTargetSave = removedTabs.length;
+await saveAndCloseTabToGroup(
+  700,
+  'bound-target-session',
+  'bound-target-group',
+);
+const boundTarget = await getSavedSession('bound-target-session');
+assert.deepEqual(
+  boundTarget.items[0].group.tabs.map((item) => item.url),
+  ['https://bound-target-tab.example', 'https://bound-source-tab.example'],
+);
+assert.deepEqual(removedTabs.slice(removedBeforeTargetSave), [700]);
+
+const removedBeforeRejectedTargetSave = removedTabs.length;
+await assert.rejects(
+  () => saveAndCloseTabToGroup(700, 'bound-target-session', 'missing-group'),
+  /找不到要操作的分组/,
+);
+assert.equal(removedTabs.length, removedBeforeRejectedTargetSave);
 
 await writeSessions([
   session('remove-me', [{ type: 'tab', tab: tab('remove-tab') }]),

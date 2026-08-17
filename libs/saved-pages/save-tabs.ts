@@ -6,10 +6,11 @@ import {
   reserveNumericGroupTitle,
 } from './group-names';
 import { getSessions } from './persistence';
-import { addSession } from './store';
+import { addSession, appendTabsToGroup } from './store';
 import { createItemsSession } from './session-items';
 import {
   finishTaskGroupsSave,
+  getBoundSavedGroupForTab,
   prepareTaskGroupsForSave,
 } from '../tab-group-sync/sync';
 import type { SavedGroup, SavedSessionItem, SavedTab } from './model';
@@ -29,6 +30,7 @@ export interface SaveResult {
 interface SaveSelectionOptions {
   openSavedPage: boolean;
   scope: 'selection' | 'tab-groups' | 'window';
+  targetGroup?: { sessionId: string; groupId: string };
 }
 
 /**
@@ -50,6 +52,20 @@ export async function saveAndCloseTab(tabId: number): Promise<SaveResult> {
   return saveAndCloseSelection(tab.windowId, [tab], {
     openSavedPage: false,
     scope: 'selection',
+  });
+}
+
+/** Save and close one tab, appending it to an existing unarchived Bok group. */
+export async function saveAndCloseTabToGroup(
+  tabId: number,
+  sessionId: string,
+  groupId: string,
+): Promise<SaveResult> {
+  const tab = await browser.tabs.get(tabId);
+  return saveAndCloseSelection(tab.windowId, [tab], {
+    openSavedPage: false,
+    scope: 'selection',
+    targetGroup: { sessionId, groupId },
   });
 }
 
@@ -109,9 +125,22 @@ async function saveAndCloseSelection(
     .map((tab) => toCapturableTab(tab, internalPageUrls))
     .filter((tab): tab is CapturableTab => tab != null);
   const preparedTaskGroups = await prepareTaskGroupsForSave(windowId);
-  const capturable = allCapturable.filter(
+  let capturable = allCapturable.filter(
     (tab) => !preparedTaskGroups.excludedTabIds.has(tab.id),
   );
+  if (options.targetGroup) {
+    const bindings = await Promise.all(
+      allCapturable.map((tab) => getBoundSavedGroupForTab(tab.id)),
+    );
+    capturable = allCapturable.filter((_, index) => {
+      const binding = bindings[index];
+      return (
+        binding === null ||
+        binding.sessionId !== options.targetGroup?.sessionId ||
+        binding.groupId !== options.targetGroup.groupId
+      );
+    });
+  }
   const selectedTabIds = await expandSelectedTabIdsAfterRecovery(
     windowId,
     selectedTabs,
@@ -132,8 +161,14 @@ async function saveAndCloseSelection(
   }
 
   let groups: SavedGroup[] = [];
-  if (capturable.length > 0) {
-    const createdAt = Date.now();
+  const createdAt = Date.now();
+  if (options.targetGroup) {
+    await appendTabsToGroup(
+      options.targetGroup.sessionId,
+      options.targetGroup.groupId,
+      capturable.map((tab) => toSavedTab(tab, createdAt)),
+    );
+  } else if (capturable.length > 0) {
     const groupedTitles = collectGroupedTitles(await getSessions());
     const items = await buildItems(
       capturable,

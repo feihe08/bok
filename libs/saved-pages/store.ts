@@ -32,6 +32,12 @@ export interface ConvertGroupResult {
   renamed: boolean;
 }
 
+export interface SavedGroupTarget {
+  sessionId: string;
+  groupId: string;
+  title: string;
+}
+
 function requireSession(
   sessions: SavedSession[],
   sessionId: string,
@@ -79,6 +85,38 @@ function requireTab(group: SavedGroup, tabId: string): SavedTab {
 export async function addSession(session: SavedSession): Promise<void> {
   const sessions = await getSessions();
   await writeSessions([session, ...sessions]);
+}
+
+export async function getUnarchivedSavedGroupTargets(): Promise<SavedGroupTarget[]> {
+  const sessions = await getSessions();
+  return sessions.flatMap((session) =>
+    session.archivedAt === null
+      ? getRealGroups(session).flatMap((group) =>
+          group.archivedAt === null
+            ? [{ sessionId: session.id, groupId: group.id, title: group.title }]
+            : [],
+        )
+      : [],
+  );
+}
+
+export async function appendTabsToGroup(
+  sessionId: string,
+  groupId: string,
+  tabs: SavedTab[],
+): Promise<void> {
+  const sessions = await getSessions();
+  const session = requireSession(sessions, sessionId);
+  if (session.archivedAt !== null) {
+    throw new Error('目标保存记录已归档，请先恢复');
+  }
+  const group = requireGroup(session, groupId);
+  if (group.archivedAt !== null) {
+    throw new Error('目标分组已归档，请先恢复');
+  }
+  if (tabs.length === 0) return;
+  group.tabs.push(...tabs);
+  await writeSessions(sessions);
 }
 
 export async function getSavedGroup(
