@@ -457,8 +457,6 @@ export default function BokPage() {
   const tabTaskStatusRefs = useRef(new Map<string, HTMLSelectElement>());
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const sessionMenuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
-  const groupTaskButtonRefs = useRef(new Map<string, HTMLButtonElement>());
-  const groupDeleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const menuItemRefs = useRef(new Map<string, Array<HTMLButtonElement | undefined>>());
   const sessionMenuItemRefs = useRef(
     new Map<string, Array<HTMLButtonElement | undefined>>(),
@@ -822,28 +820,6 @@ export default function BokPage() {
     }, 120);
   }
 
-  function focusGroupDeleteButton(groupId: string) {
-    window.setTimeout(() => {
-      const button = groupDeleteButtonRefs.current.get(groupId);
-      if (button?.isConnected && !button.disabled) {
-        button.focus();
-        return;
-      }
-      document.getElementById('saved-groups')?.focus();
-    }, 120);
-  }
-
-  function focusGroupTaskButton(groupId: string) {
-    window.setTimeout(() => {
-      const button = groupTaskButtonRefs.current.get(groupId);
-      if (button?.isConnected && !button.disabled) {
-        button.focus();
-        return;
-      }
-      document.getElementById('saved-groups')?.focus();
-    }, 120);
-  }
-
   function setMenuItemRef(
     groupId: string,
     index: number,
@@ -1137,6 +1113,7 @@ export default function BokPage() {
       showCommandError('更新固定状态', error);
     } finally {
       setChangingGroupId('');
+      focusMenuTrigger(group.id);
     }
   }
 
@@ -1173,6 +1150,7 @@ export default function BokPage() {
       showCommandError(archiving ? '归档分组' : '恢复分组', error);
     } finally {
       setChangingGroupId('');
+      focusMenuTrigger(group.id);
     }
   }
 
@@ -1246,7 +1224,6 @@ export default function BokPage() {
   async function setGroupTaskStatus(
     group: ManagedGroup,
     status: TaskStatus | null,
-    source: 'menu' | 'header' = 'menu',
   ) {
     if (changingGroupId) return;
     closeGroupMenu(true);
@@ -1273,8 +1250,7 @@ export default function BokPage() {
       showCommandError('更新任务状态', error);
     } finally {
       setChangingGroupId('');
-      if (source === 'header') focusGroupTaskButton(group.id);
-      else focusMenuTrigger(group.id);
+      focusMenuTrigger(group.id);
     }
   }
 
@@ -1324,7 +1300,7 @@ export default function BokPage() {
     const storedGroup = groups.find((candidate) => candidate.id === group.id) ?? group;
     if (storedGroup.locked) {
       setActionNotice({ type: 'error', message: '分组已锁定，无法删除。' });
-      focusGroupDeleteButton(group.id);
+      focusMenuTrigger(group.id);
       return;
     }
     const title = getGroupTitle(storedGroup);
@@ -1333,7 +1309,7 @@ export default function BokPage() {
         `从 Bok 保存记录中永久删除整个分组“${title}”及其中 ${storedGroup.tabs.length} 个标签？此操作无法恢复。`,
       )
     ) {
-      focusGroupDeleteButton(group.id);
+      focusMenuTrigger(group.id);
       return;
     }
 
@@ -1347,7 +1323,7 @@ export default function BokPage() {
       requestAnimationFrame(() => document.getElementById('saved-groups')?.focus());
     } catch (error) {
       showCommandError('删除分组', error);
-      focusGroupDeleteButton(group.id);
+      focusMenuTrigger(group.id);
     }
   }
 
@@ -2618,9 +2594,13 @@ export default function BokPage() {
                 const GroupHeading = isMergedGroup ? 'h2' : 'h3';
                 const title = getGroupTitle(group);
                 const isTaskGroup = group.taskStatus !== null;
-                const deduplicateMenuIndex = 2;
-                const lockMenuIndex = deduplicateMenuIndex + 1;
-                const taskMenuStartIndex = lockMenuIndex + 1;
+                const pinMenuIndex = 2;
+                const archiveMenuIndex = 3;
+                const taskMenuStartIndex = 4;
+                const taskOffMenuIndex = 7;
+                const deduplicateMenuIndex = 8;
+                const lockMenuIndex = 9;
+                const deleteMenuIndex = 10;
                 const defaultOpenOptions: OpenGroupOptions = {
                   mode: 'tab-group',
                   destination: 'current-window',
@@ -2779,20 +2759,6 @@ export default function BokPage() {
                       )}
 
                       <div className="tab-group__actions">
-                        {group.archivedAt === null && (
-                          <button
-                            type="button"
-                            className={`group-state-button${group.pinned ? ' group-state-button--active' : ''}`}
-                            aria-label={group.pinned ? `取消固定：${title}` : `固定：${title}`}
-                            aria-pressed={group.pinned}
-                            title={group.pinned ? '取消固定' : '固定（跳过自动归档）'}
-                            disabled={Boolean(changingGroupId)}
-                            onClick={() => void togglePinned(group)}
-                          >
-                            <PinIcon />
-                          </button>
-                        )}
-
                         <button
                           type="button"
                           className="group-open-button"
@@ -2806,69 +2772,6 @@ export default function BokPage() {
                         >
                           <BrowserGroupIcon />
                           <span>{openingGroupId === group.id ? '打开中…' : '打开全部'}</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          className="group-state-button"
-                          aria-label={`${archiveActionLabel}：${title}`}
-                          title={archiveActionLabel}
-                          disabled={Boolean(changingGroupId)}
-                          onClick={() => void toggleArchived(group)}
-                        >
-                          <ArchiveIcon restore={group.archivedAt !== null} />
-                        </button>
-
-                        <button
-                          type="button"
-                          className={`group-state-button group-task-button${isTaskGroup ? ' group-task-button--active' : ''}`}
-                          data-task-status={group.taskStatus ?? 'doing'}
-                          aria-label={
-                            isTaskGroup
-                              ? `取消任务标记：${title}`
-                              : `标记为任务：${title}`
-                          }
-                          aria-pressed={isTaskGroup}
-                          title={
-                            isTaskGroup
-                              ? `取消任务标记（当前 ${TASK_STATUS_LABELS[group.taskStatus!]}）`
-                              : '标记为任务（Doing）'
-                          }
-                          disabled={Boolean(openingGroupId) || groupChanging}
-                          ref={(element) => {
-                            if (element) groupTaskButtonRefs.current.set(group.id, element);
-                            else groupTaskButtonRefs.current.delete(group.id);
-                          }}
-                          onClick={() =>
-                            void setGroupTaskStatus(
-                              group,
-                              isTaskGroup ? null : 'doing',
-                              'header',
-                            )
-                          }
-                        >
-                          <TaskIcon status={group.taskStatus ?? 'doing'} />
-                        </button>
-
-                        <button
-                          type="button"
-                          className="group-state-button group-delete-button"
-                          aria-label={
-                            group.locked
-                              ? `分组已锁定，无法删除：${title}`
-                              : `删除分组：${title}`
-                          }
-                          title={group.locked ? '分组已锁定，无法删除' : '删除分组'}
-                          disabled={Boolean(openingGroupId) || groupChanging || group.locked}
-                          ref={(element) => {
-                            if (element) groupDeleteButtonRefs.current.set(group.id, element);
-                            else groupDeleteButtonRefs.current.delete(group.id);
-                          }}
-                          onClick={() => void deleteGroup(group)}
-                        >
-                          <svg viewBox="0 0 20 20" aria-hidden="true">
-                            <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
-                          </svg>
                         </button>
 
                         <div className="group-more" data-group-id={group.id}>
@@ -2949,6 +2852,74 @@ export default function BokPage() {
                                 在新窗口以标签组打开
                               </button>
                               <div className="group-menu__separator" role="separator" />
+                              {group.archivedAt === null && (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  ref={(element) =>
+                                    setMenuItemRef(group.id, pinMenuIndex, element)
+                                  }
+                                  onClick={() => void togglePinned(group)}
+                                >
+                                  <PinIcon />
+                                  {group.pinned ? '取消固定' : '固定分组'}
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                role="menuitem"
+                                ref={(element) =>
+                                  setMenuItemRef(group.id, archiveMenuIndex, element)
+                                }
+                                onClick={() => void toggleArchived(group)}
+                              >
+                                <ArchiveIcon restore={group.archivedAt !== null} />
+                                {archiveActionLabel}
+                              </button>
+                              <div className="group-menu__separator" role="separator" />
+                              {group.taskStatus === null ? (
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  ref={(element) =>
+                                    setMenuItemRef(group.id, taskMenuStartIndex, element)
+                                  }
+                                  onClick={() => void setGroupTaskStatus(group, 'doing')}
+                                >
+                                  <TaskIcon status="doing" />
+                                  标记为 Doing
+                                </button>
+                              ) : (
+                                <>
+                                  {(['todo', 'doing', 'done'] as const).map((status, index) => (
+                                    <button
+                                      key={status}
+                                      type="button"
+                                      role="menuitemradio"
+                                      aria-checked={group.taskStatus === status}
+                                      ref={(element) =>
+                                        setMenuItemRef(group.id, taskMenuStartIndex + index, element)
+                                      }
+                                      onClick={() => void setGroupTaskStatus(group, status)}
+                                    >
+                                      <TaskIcon status={status} />
+                                      标记为 {TASK_STATUS_LABELS[status]}
+                                    </button>
+                                  ))}
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    ref={(element) =>
+                                      setMenuItemRef(group.id, taskOffMenuIndex, element)
+                                    }
+                                    onClick={() => void setGroupTaskStatus(group, null)}
+                                  >
+                                    <TaskOffIcon />
+                                    取消任务标记
+                                  </button>
+                                </>
+                              )}
+                              <div className="group-menu__separator" role="separator" />
                               <button
                                 type="button"
                                 role="menuitem"
@@ -2974,37 +2945,23 @@ export default function BokPage() {
                                 <LockIcon open={group.locked} />
                                 {group.locked ? '解锁分组' : '锁定分组'}
                               </button>
-                              {group.taskStatus !== null && (
-                                <>
-                                  <div className="group-menu__separator" role="separator" />
-                                  {(['todo', 'doing', 'done'] as const).map((status, index) => (
-                                    <button
-                                      key={status}
-                                      type="button"
-                                      role="menuitemradio"
-                                      aria-checked={group.taskStatus === status}
-                                      ref={(element) =>
-                                        setMenuItemRef(group.id, taskMenuStartIndex + index, element)
-                                      }
-                                      onClick={() => void setGroupTaskStatus(group, status)}
-                                    >
-                                      <TaskIcon status={status} />
-                                      标记为 {TASK_STATUS_LABELS[status]}
-                                    </button>
-                                  ))}
-                                  <button
-                                    type="button"
-                                    role="menuitem"
-                                    ref={(element) =>
-                                      setMenuItemRef(group.id, taskMenuStartIndex + 3, element)
-                                    }
-                                    onClick={() => void setGroupTaskStatus(group, null)}
-                                  >
-                                    <TaskOffIcon />
-                                    取消任务标记
-                                  </button>
-                                </>
-                              )}
+                              <div className="group-menu__separator" role="separator" />
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="group-menu__danger"
+                                ref={(element) =>
+                                  setMenuItemRef(group.id, deleteMenuIndex, element)
+                                }
+                                disabled={group.locked}
+                                title={group.locked ? '分组已锁定，无法删除' : undefined}
+                                onClick={() => void deleteGroup(group)}
+                              >
+                                <svg viewBox="0 0 20 20" aria-hidden="true">
+                                  <path d="M4.5 6h11M8 3.5h4M6.5 6l.6 10h5.8l.6-10M8.5 9v4M11.5 9v4" />
+                                </svg>
+                                {group.locked ? '删除分组（已锁定）' : '删除分组'}
+                              </button>
                             </div>
                           )}
                         </div>

@@ -341,7 +341,13 @@ button {
   background: var(--surface-subtle);
 }
 
-.filter-list button[aria-pressed="true"],
+.filter-list button[aria-pressed="true"] {
+  color: var(--accent-hover);
+  background: transparent;
+  font-weight: 620;
+  box-shadow: inset 2px 0 var(--accent);
+}
+
 .group-nav button[aria-current="location"] {
   color: var(--accent-hover);
   background: var(--accent-soft);
@@ -508,10 +514,6 @@ button {
     0 4px 8px light-dark(oklch(0 0 0 / 0.07), oklch(0 0 0 / 0.18));
 }
 
-.saved-session--merged {
-  background: color-mix(in oklch, var(--surface-subtle) 45%, var(--surface));
-}
-
 .saved-session__header {
   display: flex;
   min-width: 0;
@@ -641,7 +643,7 @@ button {
 }
 
 .saved-session__items--merged {
-  padding: 16px 20px;
+  padding: 8px 20px 16px;
 }
 
 .saved-session__items--merged > .tab-group {
@@ -800,13 +802,11 @@ button {
 }
 
 .tab-group__actions .group-open-button,
-.tab-group__actions .group-state-button,
 .tab-group__actions .group-more__trigger,
 .tab-group__actions .collapse-button {
   height: 32px;
 }
 
-.tab-group__actions .group-state-button,
 .tab-group__actions .group-more__trigger,
 .tab-group__actions .collapse-button {
   width: 32px;
@@ -817,7 +817,6 @@ button {
 }
 
 .group-open-button,
-.group-state-button,
 .group-more__trigger {
   display: inline-flex;
   height: 36px;
@@ -845,42 +844,20 @@ button {
   width: 36px;
 }
 
-.group-state-button {
-  width: 36px;
-}
-
 .group-open-button:hover,
-.group-state-button:hover,
 .group-more__trigger:hover,
 .group-more__trigger[aria-expanded="true"] {
   color: var(--accent-hover);
   background: var(--surface-subtle);
 }
 
-.group-delete-button:not(:disabled):hover {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.group-task-button:not(:disabled):hover {
-  color: var(--task-color);
-  background: var(--task-soft);
-}
-
-.group-task-button--active {
-  color: var(--task-color);
-  background: var(--task-soft);
-}
-
 .group-open-button:disabled,
-.group-state-button:disabled,
 .group-more__trigger:disabled {
   color: var(--border-strong);
   cursor: default;
 }
 
 .group-open-button svg,
-.group-state-button svg,
 .group-more__trigger svg,
 .group-menu svg {
   width: 16px;
@@ -891,15 +868,6 @@ button {
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.group-state-button--active {
-  color: var(--accent-hover);
-  background: var(--accent-soft);
-}
-
-.group-state-button--active svg {
-  fill: currentColor;
 }
 
 .group-open-button .browser-group-icon {
@@ -990,6 +958,7 @@ button {
   padding: 0;
   border: 0;
   border-radius: 6px;
+  color: var(--text-muted);
   background: transparent;
   cursor: pointer;
   transition:
@@ -1003,13 +972,8 @@ button {
 }
 
 .tab-group__header .group-open-button:hover,
-.tab-group__header .group-state-button:hover,
 .tab-group__header .group-more__trigger:hover,
 .tab-group__header .group-more__trigger[aria-expanded="true"],
-.tab-group__header .group-delete-button:not(:disabled):hover,
-.tab-group__header .group-task-button:not(:disabled):hover,
-.tab-group__header .group-task-button--active,
-.tab-group__header .group-state-button--active,
 .tab-group__header .collapse-button:not(:disabled):hover {
   background: transparent;
 }
@@ -1020,11 +984,11 @@ button {
 }
 
 .collapse-button svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
   transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -1881,12 +1845,10 @@ button {
 
 @media (hover: none), (pointer: coarse) {
   .group-open-button,
-  .group-state-button,
   .group-more__trigger {
     min-height: 44px;
   }
 
-  .group-state-button,
   .group-more__trigger {
     width: 44px;
   }

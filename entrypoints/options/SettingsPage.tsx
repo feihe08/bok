@@ -51,6 +51,7 @@ type SettingsSection =
 
 const THEME_STORAGE_KEY = 'bok-theme';
 const BACKUP_DEVICE_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
+const NOTICE_EXIT_DURATION_MS = 120;
 
 function getStoredTheme(): Theme | null {
   const value = localStorage.getItem(THEME_STORAGE_KEY);
@@ -94,15 +95,22 @@ function formatBackupTime(timestamp: number | null): string {
 }
 
 function ThemeIcon({ dark }: { dark: boolean }) {
-  return dark ? (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <circle cx="10" cy="10" r="3.25" />
-      <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M16.5 12.2A6.6 6.6 0 0 1 7.8 3.5a6.6 6.6 0 1 0 8.7 8.7Z" />
-    </svg>
+  return (
+    <span className="theme-icon" aria-hidden="true">
+      <svg
+        className={`theme-icon__glyph${dark ? ' is-visible' : ''}`}
+        viewBox="0 0 20 20"
+      >
+        <circle cx="10" cy="10" r="3.25" />
+        <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
+      </svg>
+      <svg
+        className={`theme-icon__glyph${dark ? '' : ' is-visible'}`}
+        viewBox="0 0 20 20"
+      >
+        <path d="M16.5 12.2A6.6 6.6 0 0 1 7.8 3.5a6.6 6.6 0 1 0 8.7 8.7Z" />
+      </svg>
+    </span>
   );
 }
 
@@ -145,6 +153,8 @@ export default function SettingsPage() {
   const [bookmarksPermission, setBookmarksPermission] = useState(false);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [renderedNotice, setRenderedNotice] = useState<Notice | null>(null);
+  const [noticeVisible, setNoticeVisible] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
   const deviceNameInputRef = useRef<HTMLInputElement>(null);
   const deviceNameEditButtonRef = useRef<HTMLButtonElement>(null);
@@ -269,6 +279,23 @@ export default function SettingsPage() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    setRenderedNotice(notice);
+    const frameId = requestAnimationFrame(() => setNoticeVisible(true));
+    return () => cancelAnimationFrame(frameId);
+  }, [notice]);
+
+  useEffect(() => {
+    if (notice || !renderedNotice) return;
+    setNoticeVisible(false);
+    const timeoutId = window.setTimeout(
+      () => setRenderedNotice(null),
+      NOTICE_EXIT_DURATION_MS,
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [notice, renderedNotice]);
 
   function toggleTheme() {
     const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
@@ -1068,10 +1095,18 @@ export default function SettingsPage() {
       <div className="sr-only" role="alert" aria-atomic="true">
         {notice?.type === 'error' ? notice.message : ''}
       </div>
-      {notice && (
-        <div className={`settings-notice settings-notice--${notice.type}`}>
-          <span>{notice.message}</span>
-          <button type="button" aria-label="关闭提示" onClick={() => setNotice(null)}>
+      {renderedNotice && (
+        <div
+          className={`settings-notice settings-notice--${renderedNotice.type}${noticeVisible ? ' is-visible' : ''}`}
+          aria-hidden={!noticeVisible}
+        >
+          <span>{renderedNotice.message}</span>
+          <button
+            type="button"
+            aria-label="关闭提示"
+            tabIndex={noticeVisible ? 0 : -1}
+            onClick={() => setNotice(null)}
+          >
             关闭
           </button>
         </div>
