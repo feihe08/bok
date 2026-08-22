@@ -151,6 +151,8 @@ export default function SettingsPage() {
   const [directoryPermission, setDirectoryPermission] =
     useState<DirectoryPermission>('missing');
   const [bookmarksPermission, setBookmarksPermission] = useState(false);
+  const [codexBookmarkBridgePermission, setCodexBookmarkBridgePermission] =
+    useState(false);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState<Notice | null>(null);
   const [renderedNotice, setRenderedNotice] = useState<Notice | null>(null);
@@ -181,12 +183,14 @@ export default function SettingsPage() {
       nextState,
       nextDirectoryPermission,
       canReadBookmarks,
+      canUseCodexBookmarkBridge,
       nextAutoArchivePeriod,
     ] =
       await Promise.all([
         getBookmarkBackupState(),
         getBookmarkBackupDirectoryPermission(),
         browser.permissions.contains({ permissions: ['bookmarks'] }),
+        browser.permissions.contains({ permissions: ['nativeMessaging'] }),
         getSavedPagesAutoArchivePeriod(),
       ]);
     const nextBookmarkFolderSettings = canReadBookmarks
@@ -195,6 +199,9 @@ export default function SettingsPage() {
     setState(nextState);
     setDirectoryPermission(nextDirectoryPermission);
     setBookmarksPermission(canReadBookmarks);
+    setCodexBookmarkBridgePermission(
+      canReadBookmarks && canUseCodexBookmarkBridge,
+    );
     setAutoArchivePeriod(nextAutoArchivePeriod);
     setBookmarkFolderSettings(nextBookmarkFolderSettings);
   }, []);
@@ -568,6 +575,53 @@ export default function SettingsPage() {
     }
   }
 
+  async function grantCodexBookmarkBridgePermission() {
+    if (busy) return;
+    setBusy('codex-bookmarks');
+    setNotice(null);
+    try {
+      const granted = await browser.permissions.request({
+        permissions: ['bookmarks', 'nativeMessaging'],
+      });
+      if (!granted) throw new Error('未允许本机桥接，Codex 不能操作 Chrome 书签');
+      setNotice({
+        type: 'success',
+        message: '已允许 Codex 通过本机 Bok 桥接访问书签。',
+      });
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message:
+          error instanceof Error ? error.message : '无法启用 Codex 书签访问',
+      });
+    } finally {
+      setBusy('');
+      await refresh();
+    }
+  }
+
+  async function revokeCodexBookmarkBridgePermission() {
+    if (busy) return;
+    setBusy('codex-bookmarks');
+    setNotice(null);
+    try {
+      const removed = await browser.permissions.remove({
+        permissions: ['nativeMessaging'],
+      });
+      if (!removed) throw new Error('无法关闭本机桥接，请重新加载 Bok 后重试');
+      setNotice({ type: 'success', message: '已关闭 Codex 书签访问。' });
+    } catch (error) {
+      setNotice({
+        type: 'error',
+        message:
+          error instanceof Error ? error.message : '无法关闭 Codex 书签访问',
+      });
+    } finally {
+      setBusy('');
+      await refresh();
+    }
+  }
+
   async function importData(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -872,6 +926,34 @@ export default function SettingsPage() {
                             ? '当前沿用 Inbox；选择后只在当前 Chrome 资料中生效。'
                             : '只在当前 Chrome 资料中生效，不随设置备份迁移。'}
                     </p>
+                  </div>
+                </dd>
+              </div>
+              <div className="settings-row">
+                <dt>Codex 书签访问</dt>
+                <dd>
+                  <div className="settings-select-control">
+                    <p>
+                      {codexBookmarkBridgePermission
+                        ? '已允许本机 Codex 读取书签，并在核对当前标题和目录后重命名文件夹或移动书签。'
+                        : '允许后，本机 Codex 可通过 Bok 读取书签，并执行经过预览的文件夹重命名或书签移动。'}
+                    </p>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={Boolean(busy)}
+                      onClick={() =>
+                        void (codexBookmarkBridgePermission
+                          ? revokeCodexBookmarkBridgePermission()
+                          : grantCodexBookmarkBridgePermission())
+                      }
+                    >
+                      {busy === 'codex-bookmarks'
+                        ? '处理中…'
+                        : codexBookmarkBridgePermission
+                          ? '关闭 Codex 访问'
+                          : '允许 Codex 访问'}
+                    </button>
                   </div>
                 </dd>
               </div>

@@ -44,7 +44,7 @@ export default defineConfig({
       'alarms',
       'contextMenus',
     ],
-    optional_permissions: ['bookmarks'],
+    optional_permissions: ['bookmarks', 'nativeMessaging'],
     action: {
       default_icon: {
         16: 'icon/16.png',

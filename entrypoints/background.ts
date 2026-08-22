@@ -12,6 +12,11 @@ import {
   isDefaultFolderMarker,
   markDefaultBookmarkFolderAsMostRecentlyModified,
 } from '../libs/bookmarks/default-folder';
+import {
+  connectCodexBookmarkBridge,
+  disconnectCodexBookmarkBridge,
+  executeCodexBookmarkRequest,
+} from '../libs/bookmarks/codex-bridge';
 import type { BookmarkNode } from '../libs/bookmarks/model';
 import type {
   BookmarkBackupResponse,
@@ -45,6 +50,8 @@ import {
 
 const AUTO_ARCHIVE_ALARM = 'bok-auto-archive';
 const AUTO_ARCHIVE_INTERVAL_MINUTES = 60;
+const CODEX_BOOKMARK_BRIDGE_ALARM = 'bok-codex-bookmark-bridge';
+const CODEX_BOOKMARK_BRIDGE_INTERVAL_MINUTES = 1;
 const TASK_GROUP_RECONCILE_DEBOUNCE_MS = 120;
 const GROUP_BINDING_RESTORE_DEBOUNCE_MS = 750;
 const BOOKMARK_DEFAULT_FOLDER_DEBOUNCE_MS = 250;
@@ -193,6 +200,28 @@ async function ensureAutoArchiveAlarm(): Promise<void> {
   await browser.alarms.create(AUTO_ARCHIVE_ALARM, {
     periodInMinutes: AUTO_ARCHIVE_INTERVAL_MINUTES,
   });
+}
+
+async function syncCodexBookmarkBridge(): Promise<void> {
+  const [canReadBookmarks, canUseNativeMessaging] = await Promise.all([
+    browser.permissions.contains({ permissions: ['bookmarks'] }),
+    browser.permissions.contains({ permissions: ['nativeMessaging'] }),
+  ]);
+  if (!canReadBookmarks || !canUseNativeMessaging || !browser.bookmarks) {
+    disconnectCodexBookmarkBridge();
+    await browser.alarms.clear(CODEX_BOOKMARK_BRIDGE_ALARM);
+    return;
+  }
+
+  connectCodexBookmarkBridge((request) =>
+    enqueueOperation(() => executeCodexBookmarkRequest(request)),
+  );
+  const existing = await browser.alarms.get(CODEX_BOOKMARK_BRIDGE_ALARM);
+  if (!existing) {
+    await browser.alarms.create(CODEX_BOOKMARK_BRIDGE_ALARM, {
+      periodInMinutes: CODEX_BOOKMARK_BRIDGE_INTERVAL_MINUTES,
+    });
+  }
 }
 
 async function runAutoArchive(): Promise<void> {
@@ -414,6 +443,9 @@ export default defineBackground(() => {
   void ensureAutoArchiveAlarm().catch((error) => {
     console.error('[bok] failed to schedule automatic archive', error);
   });
+  void syncCodexBookmarkBridge().catch((error) => {
+    console.error('[bok] failed to initialize Codex bookmark bridge', error);
+  });
   void enqueueOperation(async () => {
     await restoreTaskGroupBindings();
     const renamedGroups = await ensureUniqueGroupedTitles();
@@ -427,10 +459,15 @@ export default defineBackground(() => {
   });
 
   browser.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name !== AUTO_ARCHIVE_ALARM) return;
-    void enqueueOperation(runAutoArchive).catch((error) => {
-      console.error('[bok] failed to run scheduled archive', error);
-    });
+    if (alarm.name === AUTO_ARCHIVE_ALARM) {
+      void enqueueOperation(runAutoArchive).catch((error) => {
+        console.error('[bok] failed to run scheduled archive', error);
+      });
+    } else if (alarm.name === CODEX_BOOKMARK_BRIDGE_ALARM) {
+      void syncCodexBookmarkBridge().catch((error) => {
+        console.error('[bok] failed to reconnect Codex bookmark bridge', error);
+      });
+    }
   });
 
   browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -479,11 +516,27 @@ export default defineBackground(() => {
         console.error('[bok] failed to recover bookmark default folder markers', error);
       });
     }
+    if (
+      permissions.permissions?.includes('bookmarks') ||
+      permissions.permissions?.includes('nativeMessaging')
+    ) {
+      void syncCodexBookmarkBridge().catch((error) => {
+        console.error('[bok] failed to enable Codex bookmark bridge', error);
+      });
+    }
   });
 
   browser.permissions.onRemoved.addListener((permissions) => {
     if (permissions.permissions?.includes('bookmarks')) {
       unregisterBookmarkDefaultFolderListeners();
+    }
+    if (
+      permissions.permissions?.includes('bookmarks') ||
+      permissions.permissions?.includes('nativeMessaging')
+    ) {
+      void syncCodexBookmarkBridge().catch((error) => {
+        console.error('[bok] failed to disable Codex bookmark bridge', error);
+      });
     }
   });
 

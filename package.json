@@ -15,7 +15,11 @@
     "check:session-import": "jiti scripts/check-session-import.mjs",
     "check:session-operations": "jiti scripts/check-session-operations.mjs",
     "check:bookmark-backup": "jiti scripts/check-bookmark-backup.mjs",
+    "check:bookmark-codex-bridge": "jiti scripts/check-bookmark-codex-bridge.mjs",
+    "check:bookmark-native-host": "node scripts/check-bookmark-native-host.mjs",
     "check:bookmark-default-folder": "jiti scripts/check-bookmark-default-folder.mjs",
+    "bookmarks:codex": "node scripts/bok-bookmarks-cli.mjs",
+    "bookmarks:install-bridge": "node scripts/install-bookmark-native-host.mjs",
     "postinstall": "wxt prepare"
   },
   "dependencies": {
