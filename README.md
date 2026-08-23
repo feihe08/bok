@@ -35,15 +35,26 @@ profile; do not load both builds into the same browser profile at the same time.
 
 Use `pnpm worktree create <slug>` after the requirement is clear. The command
 creates `codex/<slug>` in the sibling `bok-worktrees/` directory and enforces a
-maximum of six linked worktrees; the primary checkout is not counted. Initialize
+maximum of ten linked worktrees; the primary checkout is not counted. Initialize
 the new worktree with `pnpm install --frozen-lockfile` and use `pnpm verify` for
-the baseline compile and non-release build.
+the baseline compile and non-release build. At the start of each user turn in a
+manager-owned linked worktree, run `pnpm worktree touch` to record conversation
+activity; it never adopts a manually created worktree.
 
 After independent review and verification, bind the merge to the checked commit
-with `pnpm worktree merge <slug> --verified-sha <sha>`. Then remove the merged
-worktree and its branch with `pnpm worktree close <slug>`. Use
+with `pnpm worktree merge <slug> --verified-sha <sha>`. A successful merge keeps
+the worktree and marks it retained. For another code requirement in the same
+slot, run `pnpm worktree reuse <slug>` to fast-forward it to current `main` and
+mark it active before development. The linked checkout keeps its `codex/<slug>`
+branch because Git cannot check out `main` in two worktrees; after merge or reuse,
+that branch and the primary `main` point to the same commit. Use
 `pnpm worktree list` and `pnpm worktree doctor` for status. Ordinary verification
 must not use `pnpm build` or `pnpm zip`, because those commands perform a release.
+Delete a clean merged slot explicitly with `pnpm worktree close <slug>` only when
+requested. When creating an eleventh slot, the manager automatically removes the
+least-recently-active eligible retained slot; active, dirty, unmerged, locked,
+prunable, unmanaged, and calling worktrees are never eligible. Recency uses the
+activity recorded by create, touch, reuse, and merge.
 If a worktree directory was deleted manually, preview stale metadata cleanup with
 `pnpm worktree prune`; `--apply` requires explicit confirmation of that preview.
 
