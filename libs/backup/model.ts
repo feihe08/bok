@@ -1,4 +1,5 @@
 import type { ImportBookmarkArchiveResult } from '../bookmarks/model';
+import type { ImportReadingListResult } from '../reading-list/model';
 import type { ImportSessionsResult } from '../saved-pages/persistence';
 
 export interface BookmarkBackupState {
@@ -9,6 +10,7 @@ export interface BookmarkBackupState {
   lastSuccessfulBackupDay: string | null;
   lastBackupFileName: string | null;
   lastSavedPagesBackupFileName: string | null;
+  lastReadingListBackupFileName: string | null;
   lastSettingsBackupFileName: string | null;
   lastArchiveBackupFileName: string | null;
   lastWeeklyBackupAt: number | null;
@@ -42,6 +44,7 @@ export type ImportDataCommand = {
 
 export type ImportDataResult =
   | ImportSessionsResult
+  | ImportReadingListResult
   | ImportBookmarkArchiveResult;
 
 export type ImportDataResponse =

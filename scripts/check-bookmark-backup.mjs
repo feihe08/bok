@@ -237,6 +237,7 @@ assert.equal(await backup.getBackupDeviceName(), 'personal');
 const first = await backup.runBookmarkBackup(true);
 assert.equal(first.status, 'success');
 assert.equal(first.state.lastSavedPagesBackupFileName, 'devices/personal/bok-saved-pages.json');
+assert.equal(first.state.lastReadingListBackupFileName, 'shared/bok-reading-list.json');
 assert.equal(first.state.lastSettingsBackupFileName, 'devices/personal/bok-settings.json');
 assert.equal(first.state.lastBackupFileName, 'shared/bok-bookmarks.json');
 assert.equal(first.state.lastArchiveBackupFileName, 'shared/bok-bookmark-archive.json');
@@ -252,6 +253,15 @@ assert.equal(
   firstClaim.claimId,
 );
 assert.equal(JSON.parse(await readText(root, 'devices/personal/bok-saved-pages.json')).schemaVersion, 3);
+const readingListBackup = JSON.parse(
+  await readText(root, 'shared/bok-reading-list.json'),
+);
+assert.deepEqual(readingListBackup, {
+  schemaVersion: 1,
+  kind: 'bok-reading-list',
+  revision: 0,
+  items: [],
+});
 const settingsBackup = JSON.parse(await readText(root, 'devices/personal/bok-settings.json'));
 assert.deepEqual(settingsBackup.settings, { savedPagesAutoArchivePeriod: 3, theme: 'dark' });
 assert.deepEqual(Object.keys(settingsBackup.settings).sort(), ['savedPagesAutoArchivePeriod', 'theme']);
@@ -260,7 +270,9 @@ assert.equal(JSON.stringify(settingsBackup).includes('deviceName'), false);
 assert.equal(JSON.stringify(settingsBackup).includes('bookmarkBackupState'), false);
 assert.equal(root.files.has('bok-bookmarks.json'), false);
 assert.equal(root.files.has('bok-bookmark-archive.json'), false);
+assert.equal(root.files.has('bok-reading-list.json'), false);
 assert.equal(directoryAt(root, 'devices/personal').files.has('bok-bookmarks.json'), false);
+assert.equal(directoryAt(root, 'devices/personal').files.has('bok-reading-list.json'), false);
 assert.equal(directoryAt(root, 'shared').files.has('bok-saved-pages.json'), false);
 
 const deviceWeekly = first.state.lastWeeklyBackupFileName;
@@ -273,10 +285,10 @@ assert.deepEqual(
 );
 assert.deepEqual(
   Object.keys((await readZip(root, sharedWeekly)).files).sort(),
-  ['bok-bookmark-archive.json', 'bok-bookmarks.json'],
+  ['bok-bookmark-archive.json', 'bok-bookmarks.json', 'bok-reading-list.json'],
 );
 const firstDeviceWeeklyBytes = await readBytes(root, deviceWeekly);
-const firstSharedWeeklyBytes = await readBytes(root, sharedWeekly);
+let firstSharedWeeklyBytes = await readBytes(root, sharedWeekly);
 
 const claimBeforeReuse = await readText(root, 'devices/personal/device.json');
 await backup.saveBackupDeviceName(' Personal ');
@@ -288,6 +300,35 @@ const queuedForcedBackup = backup.runBookmarkBackup(true);
 assert.notEqual(queuedForcedBackup, ordinaryBackup);
 assert.equal((await ordinaryBackup).status, 'already-backed-up');
 assert.equal((await queuedForcedBackup).status, 'success');
+
+const stateBeforeSharedPathCorrection = await backup.getBookmarkBackupState();
+await fakeBrowser.storage.local.set({
+  [backup.BOOKMARK_BACKUP_STATE_KEY]: {
+    ...stateBeforeSharedPathCorrection,
+    lastReadingListBackupFileName: 'devices/personal/bok-reading-list.json',
+  },
+});
+const correctedSharedPathBackup = await backup.runBookmarkBackup(false);
+assert.equal(correctedSharedPathBackup.status, 'success');
+assert.equal(
+  correctedSharedPathBackup.state.lastReadingListBackupFileName,
+  'shared/bok-reading-list.json',
+);
+assert.deepEqual(
+  await readBytes(root, correctedSharedPathBackup.state.lastWeeklyBackupFileName),
+  firstDeviceWeeklyBytes,
+);
+assert.deepEqual(
+  Object.keys((await readZip(
+    root,
+    correctedSharedPathBackup.state.lastSharedWeeklyBackupFileName,
+  )).files).sort(),
+  ['bok-bookmark-archive.json', 'bok-bookmarks.json', 'bok-reading-list.json'],
+);
+firstSharedWeeklyBytes = await readBytes(
+  root,
+  correctedSharedPathBackup.state.lastSharedWeeklyBackupFileName,
+);
 
 for (const invalidName of ['', 'personal/work', 'A'.repeat(33)]) {
   await assert.rejects(() => backup.saveBackupDeviceName(invalidName), /机器名称只能包含/);
@@ -359,6 +400,7 @@ assert.ok(fileAt(root, 'devices/work/device.json'));
 assert.ok(fileAt(root, 'devices/work/bok-saved-pages.json'));
 assert.equal(await readText(root, 'devices/personal/bok-saved-pages.json'), personalSavedBeforeRename);
 const currentState = await backup.getBookmarkBackupState();
+assert.equal(currentState.lastReadingListBackupFileName, 'shared/bok-reading-list.json');
 const workClaim = JSON.parse(await readText(root, 'devices/work/device.json'));
 assert.equal(workClaim.deviceName, 'work');
 assert.notEqual(workClaim.claimId, takeoverClaim.claimId);
@@ -370,6 +412,20 @@ assert.equal(
 );
 assert.ok(currentState.lastWeeklyBackupFileName?.startsWith('devices/work/history/'));
 assert.ok(currentState.lastSharedWeeklyBackupFileName?.startsWith('shared/history/'));
+assert.equal(directoryAt(root, 'devices/personal').files.has('bok-reading-list.json'), false);
+assert.equal(directoryAt(root, 'devices/work').files.has('bok-reading-list.json'), false);
+assert.equal(
+  JSON.parse(await readText(root, 'shared/bok-reading-list.json')).kind,
+  'bok-reading-list',
+);
+assert.deepEqual(
+  Object.keys((await readZip(root, currentState.lastWeeklyBackupFileName)).files).sort(),
+  ['bok-saved-pages.json', 'bok-settings.json'],
+);
+assert.deepEqual(
+  Object.keys((await readZip(root, currentState.lastSharedWeeklyBackupFileName)).files).sort(),
+  ['bok-bookmark-archive.json', 'bok-bookmarks.json', 'bok-reading-list.json'],
+);
 assert.deepEqual(
   await readBytes(root, personalDeviceWeeklyPath),
   personalDeviceWeeklyBeforeRename,

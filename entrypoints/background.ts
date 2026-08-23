@@ -29,6 +29,15 @@ import {
   saveAndCloseTabGroup,
   saveAndCloseTabs,
 } from '../libs/saved-pages/save-tabs';
+import {
+  isReadingListCommand,
+  type ReadingListResponse,
+} from '../libs/reading-list/messages';
+import {
+  addReadingListTabSnapshot,
+  executeReadingListCommand,
+  type ReadingListTabSnapshot,
+} from '../libs/reading-list/operations';
 import { executeSavedPageCommand } from '../libs/saved-pages/operations';
 import {
   archiveEligibleGroups,
@@ -56,6 +65,7 @@ const TASK_GROUP_RECONCILE_DEBOUNCE_MS = 120;
 const GROUP_BINDING_RESTORE_DEBOUNCE_MS = 750;
 const BOOKMARK_DEFAULT_FOLDER_DEBOUNCE_MS = 250;
 const OPEN_BOK_MENU_ID = 'bok/open';
+const ADD_TO_READING_LIST_MENU_ID = 'bok/add-to-reading-list';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
 const SAVE_TAB_MENU_ID = 'bok/save-tab';
 const SAVE_GROUP_MENU_ID = 'bok/save-group';
@@ -71,9 +81,12 @@ const PAGE_CONTEXTS = [
   'video',
   'audio',
 ] as const;
+const ACTION_DEFAULT_TITLE = '保存并关闭全部标签';
+const READING_LIST_FEEDBACK_DURATION_MS = 2_500;
 
 const CONTEXT_MENU_COMMANDS = [
   { id: OPEN_BOK_MENU_ID, title: '打开 Bok' },
+  { id: ADD_TO_READING_LIST_MENU_ID, title: '收藏' },
   { id: SAVE_ALL_MENU_ID, title: '保存全部标签' },
   { id: SAVE_TAB_MENU_ID, title: '保存此标签' },
   { id: SAVE_GROUP_MENU_ID, title: '保存此标签组' },
@@ -108,11 +121,48 @@ function parseSaveTabToGroupMenuId(
     : null;
 }
 
+interface ContextMenuTabSnapshot {
+  readonly id: number | undefined;
+  readonly windowId: number | undefined;
+  readonly pendingUrl: string | undefined;
+  readonly url: string | undefined;
+  readonly title: string | undefined;
+}
+
+function snapshotContextMenuTab(
+  tab?: {
+    id?: number;
+    windowId?: number;
+    pendingUrl?: string;
+    url?: string;
+    title?: string;
+  },
+): ContextMenuTabSnapshot {
+  return Object.freeze({
+    id: tab?.id,
+    windowId: tab?.windowId,
+    pendingUrl: tab?.pendingUrl,
+    url: tab?.url,
+    title: tab?.title,
+  });
+}
+
+function snapshotReadingListTab(
+  tab: ContextMenuTabSnapshot,
+): ReadingListTabSnapshot {
+  return Object.freeze({
+    url: tab.url,
+    title: tab.title,
+  });
+}
+
 let operationQueue = Promise.resolve();
 let contextMenuQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
 let groupBindingRestoreTimer: ReturnType<typeof setTimeout> | undefined;
 let bookmarkDefaultFolderTimer: ReturnType<typeof setTimeout> | undefined;
+const readingListFeedbackTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const readingListFeedbackTokens = new Map<number, object>();
 const pendingTaskGroupAdoptionIds = new Set<number>();
 const pendingTaskGroupIds = new Set<number>();
 const pendingTaskTabIds = new Set<number>();
@@ -124,6 +174,52 @@ function enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return task;
+}
+
+function cancelReadingListFeedbackTimer(tabId: number): void {
+  const timer = readingListFeedbackTimers.get(tabId);
+  if (timer !== undefined) clearTimeout(timer);
+  readingListFeedbackTimers.delete(tabId);
+}
+
+function clearReadingListFeedback(tabId: number, token?: object): void {
+  if (token && readingListFeedbackTokens.get(tabId) !== token) return;
+  const hadVisibleFeedback = readingListFeedbackTimers.has(tabId);
+  cancelReadingListFeedbackTimer(tabId);
+  readingListFeedbackTokens.delete(tabId);
+  if (!hadVisibleFeedback) return;
+  void Promise.all([
+    browser.action.setBadgeText({ tabId, text: '' }),
+    browser.action.setTitle({ tabId, title: ACTION_DEFAULT_TITLE }),
+  ]).catch(() => undefined);
+}
+
+function beginReadingListFeedback(tabId: number): object {
+  clearReadingListFeedback(tabId);
+  const token = {};
+  readingListFeedbackTokens.set(tabId, token);
+  return token;
+}
+
+function showReadingListFeedback(
+  tabId: number,
+  token: object,
+  feedback: { badge: string; title: string; color: string },
+): void {
+  if (readingListFeedbackTokens.get(tabId) !== token) return;
+  cancelReadingListFeedbackTimer(tabId);
+  void Promise.all([
+    browser.action.setBadgeText({ tabId, text: feedback.badge }),
+    browser.action.setBadgeBackgroundColor({ tabId, color: feedback.color }),
+    browser.action.setTitle({ tabId, title: feedback.title }),
+  ]).catch(() => undefined);
+  readingListFeedbackTimers.set(
+    tabId,
+    setTimeout(
+      () => clearReadingListFeedback(tabId, token),
+      READING_LIST_FEEDBACK_DURATION_MS,
+    ),
+  );
 }
 
 function scheduleBookmarkDefaultFolderReset(): void {
@@ -251,6 +347,7 @@ function isBokPageUrl(url: string | undefined): boolean {
   if (!url) return false;
   return new Set([
     browser.runtime.getURL('/saved.html'),
+    browser.runtime.getURL('/reading-list.html'),
     browser.runtime.getURL('/bookmark-manager.html'),
     browser.runtime.getURL('/options.html'),
   ]).has(url);
@@ -353,13 +450,18 @@ async function refreshSaveGroupMenuState(): Promise<void> {
 
 async function executeContextMenuCommand(
   menuId: string,
-  tab?: { id?: number; windowId?: number },
+  tab: ContextMenuTabSnapshot,
+  readingListTabSnapshot?: ReadingListTabSnapshot,
 ) {
   if (menuId === OPEN_BOK_MENU_ID) {
     await openOrFocusSavedPage(tab?.windowId);
     return undefined;
   }
   if (tab?.id == null) throw new Error('找不到当前标签页');
+  if (menuId === ADD_TO_READING_LIST_MENU_ID) {
+    if (!readingListTabSnapshot) throw new Error('找不到当前网页');
+    return addReadingListTabSnapshot(readingListTabSnapshot);
+  }
   const targetGroup = parseSaveTabToGroupMenuId(menuId);
   if (targetGroup) {
     return saveAndCloseTabToGroup(
@@ -471,6 +573,7 @@ export default defineBackground(() => {
   });
 
   browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.url !== undefined) clearReadingListFeedback(tabId);
     if (
       tab.groupId != null &&
       tab.groupId !== -1 &&
@@ -546,6 +649,7 @@ export default defineBackground(() => {
   });
 
   browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    clearReadingListFeedback(tabId);
     if (removeInfo.isWindowClosing) {
       markTaskGroupWindowClosing(removeInfo.windowId);
       void enqueueOperation(() => clearTaskGroupBindingsForWindow(removeInfo.windowId)).catch(
@@ -596,7 +700,8 @@ export default defineBackground(() => {
   });
 
   browser.contextMenus.onClicked.addListener((info, tab) => {
-    const menuId = normalizeContextMenuId(String(info.menuItemId));
+    const rawMenuId = String(info.menuItemId);
+    const menuId = normalizeContextMenuId(rawMenuId);
     if (
       !CONTEXT_MENU_COMMAND_IDS.has(menuId) &&
       parseSaveTabToGroupMenuId(menuId) === null
@@ -604,15 +709,57 @@ export default defineBackground(() => {
       return;
     }
 
-    void enqueueOperation(() => executeContextMenuCommand(menuId, tab)).then(
+    const tabSnapshot = snapshotContextMenuTab(tab);
+    const readingListTabSnapshot =
+      menuId === ADD_TO_READING_LIST_MENU_ID
+        ? snapshotReadingListTab(tabSnapshot)
+        : undefined;
+    const readingListFeedbackToken =
+      menuId === ADD_TO_READING_LIST_MENU_ID && tabSnapshot.id != null
+        ? beginReadingListFeedback(tabSnapshot.id)
+        : undefined;
+
+    void enqueueOperation(() =>
+      executeContextMenuCommand(menuId, tabSnapshot, readingListTabSnapshot),
+    ).then(
       (result) => {
         console.log('[bok] completed context menu command', {
           menuId,
           result,
         });
+        if (
+          menuId === ADD_TO_READING_LIST_MENU_ID &&
+          tabSnapshot.id != null &&
+          readingListFeedbackToken
+        ) {
+          const added = Boolean(
+            result &&
+              typeof result === 'object' &&
+              'added' in result &&
+              result.added,
+          );
+          showReadingListFeedback(tabSnapshot.id, readingListFeedbackToken, {
+            badge: '✓',
+            title: added ? '已收藏' : '已收藏（未重复添加）',
+            color: added ? '#16803c' : '#6b7280',
+          });
+          return;
+        }
         void triggerDailyBookmarkBackup();
       },
       (error) => {
+        if (
+          menuId === ADD_TO_READING_LIST_MENU_ID &&
+          tabSnapshot.id != null &&
+          readingListFeedbackToken
+        ) {
+          const reason = error instanceof Error ? error.message : String(error);
+          showReadingListFeedback(tabSnapshot.id, readingListFeedbackToken, {
+            badge: '!',
+            title: `收藏失败：${reason}`,
+            color: '#b42318',
+          });
+        }
         console.error('[bok] failed context menu command', {
           menuId,
           error,
@@ -647,6 +794,21 @@ export default defineBackground(() => {
             ok: false,
             error: error instanceof Error ? error.message : String(error),
           } satisfies ImportDataResponse);
+        },
+      );
+      return true;
+    }
+
+    if (isReadingListCommand(message)) {
+      void enqueueOperation(() => executeReadingListCommand(message)).then(
+        (result) => {
+          sendResponse({ ok: true, result } satisfies ReadingListResponse);
+        },
+        (error) => {
+          sendResponse({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          } satisfies ReadingListResponse);
         },
       );
       return true;

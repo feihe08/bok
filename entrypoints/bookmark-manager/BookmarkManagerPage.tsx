@@ -28,11 +28,11 @@ import type {
   BookmarkArchiveStore,
   BookmarkNode,
 } from '../../libs/bookmarks/model';
-import { THEME_PREFERENCE_KEY } from '../../libs/saved-pages/settings';
 import { ActionMenu, type ActionMenuEntry } from '../shared/ActionMenu';
+import { AppHeader } from '../shared/AppHeader';
+import { useBokTheme } from '../shared/useBokTheme';
 import { ArchiveView } from './ArchiveView';
 
-type Theme = 'light' | 'dark';
 type Notice = {
   type: 'success' | 'error';
   message: string;
@@ -72,23 +72,8 @@ type BookmarkEventsApi = typeof browser.bookmarks & {
   };
 };
 
-const THEME_STORAGE_KEY = 'bok-theme';
 const BOOKMARK_DRAG_TYPE = 'application/x-bok-bookmark-node';
 const FORMAT_CHARACTERS = /\p{Cf}/gu;
-
-function getStoredTheme(): Theme | null {
-  const value = localStorage.getItem(THEME_STORAGE_KEY);
-  return value === 'light' || value === 'dark' ? value : null;
-}
-
-function getSystemTheme(): Theme {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
-    ? 'dark'
-    : 'light';
-}
-
-const storedTheme = getStoredTheme();
-if (storedTheme) document.documentElement.dataset.theme = storedTheme;
 
 function cleanTitle(value: string): string {
   return value.normalize('NFKC').replace(FORMAT_CHARACTERS, '').trim();
@@ -289,19 +274,6 @@ function BookmarkIcon() {
   );
 }
 
-function ThemeIcon({ dark }: { dark: boolean }) {
-  return dark ? (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <circle cx="10" cy="10" r="3.25" />
-      <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M16.5 12.2A6.6 6.6 0 0 1 7.8 3.5a6.6 6.6 0 1 0 8.7 8.7Z" />
-    </svg>
-  );
-}
-
 function Favicon({ node }: { node: BookmarkNode }) {
   const [failed, setFailed] = useState(false);
   const faviconUrl = node.url ? getFaviconUrl(node.url) : null;
@@ -411,12 +383,12 @@ export default function BookmarkManagerPage() {
   const [archiveDialogId, setArchiveDialogId] = useState('');
   const [draggedNodeId, setDraggedNodeId] = useState('');
   const [dropTargetId, setDropTargetId] = useState('');
-  const [theme, setTheme] = useState<Theme | null>(storedTheme);
-  const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
+  const { theme: activeTheme, toggleTheme } = useBokTheme({
+    forceBackupOnWrite: true,
+  });
   const requestIdRef = useRef(0);
   const actionTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const columnsRef = useRef<HTMLDivElement>(null);
-  const activeTheme = theme ?? systemTheme;
   const deferredSearchValue = useDeferredValue(searchValue);
   const query = normalizeSearchText(deferredSearchValue);
   const currentRoot = useMemo(
@@ -493,52 +465,6 @@ export default function BookmarkManagerPage() {
       cancelled = true;
     };
   }, [loadBookmarks]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const legacyTheme = getStoredTheme();
-
-    void browser.storage.local
-      .get(THEME_PREFERENCE_KEY)
-      .then((stored) => {
-        if (legacyTheme) {
-          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
-          return browser.storage.local
-            .set({ [THEME_PREFERENCE_KEY]: legacyTheme })
-            .then(() =>
-              browser.runtime.sendMessage({
-                type: 'bok/bookmark-backup',
-                force: true,
-              }),
-            );
-        }
-
-        const preference = stored[THEME_PREFERENCE_KEY];
-        if (
-          cancelled ||
-          (preference !== 'light' && preference !== 'dark')
-        ) {
-          return;
-        }
-        localStorage.setItem(THEME_STORAGE_KEY, preference);
-        document.documentElement.dataset.theme = preference;
-        setTheme(preference);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = (event: MediaQueryListEvent) => {
-      setSystemTheme(event.matches ? 'dark' : 'light');
-    };
-    mediaQuery.addEventListener('change', onChange);
-    return () => mediaQuery.removeEventListener('change', onChange);
-  }, []);
 
   useEffect(() => {
     function onPermissionsRemoved(removed: { permissions?: string[] }) {
@@ -619,22 +545,6 @@ export default function BookmarkManagerPage() {
       console.error('[bok] failed to request bookmarks permission', error);
       setNotice({ type: 'error', message: '无法请求书签权限，请重试。' });
     }
-  }
-
-  function toggleTheme() {
-    const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = nextTheme;
-    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-    setTheme(nextTheme);
-    void browser.storage.local
-      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
-      .then(() =>
-        browser.runtime.sendMessage({
-          type: 'bok/bookmark-backup',
-          force: true,
-        }),
-      )
-      .catch(() => undefined);
   }
 
   function selectFolder(id: string, focusContent = true) {
@@ -1025,30 +935,63 @@ export default function BookmarkManagerPage() {
     );
   }
 
+  const appHeader = (
+    <AppHeader
+      activeSection="bookmarks"
+      search={{
+        label: bookmarkView === 'archived' ? '搜索归档' : '搜索书签',
+        placeholder:
+          bookmarkView === 'archived'
+            ? '搜索归档文件夹、标题或网址'
+            : '搜索文件夹、书签名称或网址',
+        value: searchValue,
+        disabled: permission !== true,
+        onChange: (event) => setSearchValue(event.target.value),
+      }}
+      theme={activeTheme}
+      onToggleTheme={toggleTheme}
+    />
+  );
+
   if (permission === null) {
     return (
-      <div className="bookmark-page bookmark-page--centered">
-        <LoadingState />
+      <div className="bookmark-page">
+        <a className="skip-link" href="#bookmark-content">
+          跳到书签列表
+        </a>
+        {appHeader}
+        <main id="bookmark-content" className="bookmark-access-state" tabIndex={-1}>
+          <LoadingState />
+        </main>
       </div>
     );
   }
 
   if (!permission) {
     return (
-      <div className="bookmark-page bookmark-page--centered">
-        <main className="permission-state">
-          <img src="/bok.svg" alt="" />
-          <h1>允许 Bok 管理 Chrome 书签栏</h1>
-          <p>
-            Bok 只读取书签栏。只有在你确认拖动或归档文件夹时才会修改内容，更改可能通过
-            Chrome 同步到其他设备。
-          </p>
-          <button type="button" onClick={() => void requestPermission()}>
-            允许访问书签
-          </button>
-          <a href="/saved.html">返回标签页</a>
+      <div className="bookmark-page">
+        <a className="skip-link" href="#bookmark-content">
+          跳到书签权限说明
+        </a>
+        {appHeader}
+        <main id="bookmark-content" className="bookmark-access-state" tabIndex={-1}>
+          <section className="permission-state">
+            <img src="/bok.svg" alt="" />
+            <h1>允许 Bok 管理 Chrome 书签栏</h1>
+            <p>
+              Bok 只读取书签栏。只有在你确认拖动或归档文件夹时才会修改内容，更改可能通过
+              Chrome 同步到其他设备。
+            </p>
+            <button type="button" onClick={() => void requestPermission()}>
+              允许访问书签
+            </button>
+          </section>
         </main>
-        {notice && <div className="bookmark-notice bookmark-notice--error">{notice.message}</div>}
+        {notice && (
+          <div className="bookmark-notice bookmark-notice--error" role="alert">
+            {notice.message}
+          </div>
+        )}
       </div>
     );
   }
@@ -1071,53 +1014,7 @@ export default function BookmarkManagerPage() {
         跳到书签列表
       </a>
 
-      <header className="topbar">
-        <div className="topbar__inner">
-          <a className="brand" href="/saved.html" aria-label="Bok 标签页">
-            <img src="/bok.svg" alt="" />
-            <span>Bok</span>
-          </a>
-          <label className="search-field">
-            <span className="sr-only">
-              {bookmarkView === 'archived' ? '搜索归档' : '搜索书签'}
-            </span>
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="8.5" cy="8.5" r="5.5" />
-              <path d="m12.5 12.5 4 4" />
-            </svg>
-            <input
-              type="search"
-              value={searchValue}
-              placeholder={
-                bookmarkView === 'archived'
-                  ? '搜索归档文件夹、标题或网址'
-                  : '搜索文件夹、书签名称或网址'
-              }
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(event) => setSearchValue(event.target.value)}
-            />
-          </label>
-          <div className="topbar__actions">
-            <a className="topbar__link" href="/saved.html">
-              标签页
-            </a>
-            <a className="topbar__link" href="/options.html">
-              设置
-            </a>
-            <button
-              type="button"
-              className="theme-toggle"
-              aria-label={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
-              aria-pressed={activeTheme === 'dark'}
-              title={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
-              onClick={toggleTheme}
-            >
-              <ThemeIcon dark={activeTheme === 'dark'} />
-            </button>
-          </div>
-        </div>
-      </header>
+      {appHeader}
 
       <div className="bookmark-workspace">
         <main

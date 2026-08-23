@@ -1,5 +1,6 @@
 import { browser } from 'wxt/browser';
 import JSZip from 'jszip';
+import { exportReadingListJson } from '../reading-list/persistence';
 import { exportSessionsJson } from '../saved-pages/persistence';
 import {
   getSavedPagesAutoArchivePeriod,
@@ -33,6 +34,7 @@ const HISTORY_DIRECTORY_NAME = 'history';
 const DEVICE_CLAIM_FILE_NAME = 'device.json';
 const BOOKMARKS_BACKUP_FILE_NAME = 'bok-bookmarks.json';
 const SAVED_PAGES_BACKUP_FILE_NAME = 'bok-saved-pages.json';
+const READING_LIST_BACKUP_FILE_NAME = 'bok-reading-list.json';
 const SETTINGS_BACKUP_FILE_NAME = 'bok-settings.json';
 export const BOOKMARK_ARCHIVE_BACKUP_FILE_NAME = 'bok-bookmark-archive.json';
 const DEVICE_WEEKLY_BACKUP_PREFIX = 'bok-device-weekly-backup-';
@@ -125,6 +127,7 @@ const EMPTY_BACKUP_STATE: BookmarkBackupState = {
   lastSuccessfulBackupDay: null,
   lastBackupFileName: null,
   lastSavedPagesBackupFileName: null,
+  lastReadingListBackupFileName: null,
   lastSettingsBackupFileName: null,
   lastArchiveBackupFileName: null,
   lastWeeklyBackupAt: null,
@@ -182,6 +185,8 @@ function normalizeBackupState(
     !isNullableString(state.lastBackupFileName) ||
     !(state.lastSavedPagesBackupFileName === undefined ||
       isNullableString(state.lastSavedPagesBackupFileName)) ||
+    !(state.lastReadingListBackupFileName === undefined ||
+      isNullableString(state.lastReadingListBackupFileName)) ||
     !(state.lastSettingsBackupFileName === undefined ||
       isNullableString(state.lastSettingsBackupFileName)) ||
     !(state.lastArchiveBackupFileName === undefined ||
@@ -215,6 +220,8 @@ function normalizeBackupState(
     lastBackupFileName: state.lastBackupFileName as string | null,
     lastSavedPagesBackupFileName:
       (state.lastSavedPagesBackupFileName as string | null | undefined) ?? null,
+    lastReadingListBackupFileName:
+      (state.lastReadingListBackupFileName as string | null | undefined) ?? null,
     lastSettingsBackupFileName:
       (state.lastSettingsBackupFileName as string | null | undefined) ?? null,
     lastArchiveBackupFileName:
@@ -724,6 +731,7 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
   const currentWeek = localWeekKey(attemptedAt);
   const state = await getBookmarkBackupState();
   const bookmarksPath = relativeSharedPath(BOOKMARKS_BACKUP_FILE_NAME);
+  const readingListPath = relativeSharedPath(READING_LIST_BACKUP_FILE_NAME);
   const archivePath = relativeSharedPath(BOOKMARK_ARCHIVE_BACKUP_FILE_NAME);
 
   try {
@@ -742,6 +750,7 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
       state.lastSuccessfulBackupDay === today &&
       state.lastBackupFileName === bookmarksPath &&
       state.lastSavedPagesBackupFileName === savedPagesPath &&
+      state.lastReadingListBackupFileName === readingListPath &&
       state.lastSettingsBackupFileName === settingsPath &&
       state.lastArchiveBackupFileName === archivePath &&
       state.lastSuccessfulWeeklyBackupWeek === currentWeek &&
@@ -750,8 +759,9 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
       return { status: 'already-backed-up', state };
     }
 
-    const [savedPagesContents, settingsContents] = await Promise.all([
+    const [savedPagesContents, readingListContents, settingsContents] = await Promise.all([
       exportSessionsJson(),
+      exportReadingListJson(),
       createSettingsBackupContents(attemptedAt),
     ]);
 
@@ -780,6 +790,12 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
     );
     await assertCurrentDeviceClaim(directories.root, directories);
     await writeVerifiedBackupFile(
+      directories.shared,
+      READING_LIST_BACKUP_FILE_NAME,
+      readingListContents,
+    );
+    await assertCurrentDeviceClaim(directories.root, directories);
+    await writeVerifiedBackupFile(
       directories.device,
       SETTINGS_BACKUP_FILE_NAME,
       settingsContents,
@@ -801,12 +817,15 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
       `${HISTORY_DIRECTORY_NAME}/`,
     );
     const sharedHistoryPath = relativeSharedPath(`${HISTORY_DIRECTORY_NAME}/`);
+    const readingListBackupPathMatches =
+      state.lastReadingListBackupFileName === readingListPath;
     const deviceWeeklyBackupDue =
       state.deviceName !== directories.deviceName ||
       state.lastSuccessfulWeeklyBackupWeek !== currentWeek ||
       !state.lastWeeklyBackupFileName?.startsWith(deviceHistoryPath);
     const sharedWeeklyBackupDue =
       state.deviceName !== directories.deviceName ||
+      !readingListBackupPathMatches ||
       state.lastSuccessfulSharedWeeklyBackupWeek !== currentWeek ||
       !state.lastSharedWeeklyBackupFileName?.startsWith(sharedHistoryPath);
     const deviceWeeklyBackupFileName = deviceWeeklyBackupDue
@@ -851,6 +870,7 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
       );
       const weeklyZip = await createWeeklyBackupZip({
         [BOOKMARKS_BACKUP_FILE_NAME]: bookmarksContents,
+        [READING_LIST_BACKUP_FILE_NAME]: readingListContents,
         [BOOKMARK_ARCHIVE_BACKUP_FILE_NAME]: archiveContents,
       });
       await assertCurrentDeviceClaim(directories.root, directories);
@@ -875,6 +895,7 @@ async function performBookmarkBackup(force: boolean): Promise<BookmarkBackupResu
       lastSuccessfulBackupDay: today,
       lastBackupFileName: bookmarksPath,
       lastSavedPagesBackupFileName: savedPagesPath,
+      lastReadingListBackupFileName: readingListPath,
       lastSettingsBackupFileName: settingsPath,
       lastArchiveBackupFileName: archivePath,
       lastWeeklyBackupAt: deviceWeeklyBackupDue

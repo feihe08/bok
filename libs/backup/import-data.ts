@@ -1,4 +1,5 @@
 import { importBookmarkArchiveJson } from '../bookmarks/archive-storage';
+import { importReadingListJson } from '../reading-list/persistence';
 import { importSessionsJson } from '../saved-pages/persistence';
 import type { ImportDataCommand, ImportDataResult } from './model';
 
@@ -13,6 +14,7 @@ export async function importBokDataJson(
   }
   if (raw && typeof raw === 'object') {
     const kind = (raw as Record<string, unknown>).kind;
+    if (kind === 'bok-reading-list') return importReadingListJson(json);
     if (kind === 'bok-bookmark-archive') return importBookmarkArchiveJson(json);
     if (kind === 'bok-bookmarks-backup') {
       throw new Error('当前不支持导入 Chrome 书签备份');

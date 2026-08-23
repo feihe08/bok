@@ -2,7 +2,7 @@
   "name": "wxt-react-starter",
   "description": "manifest.json description",
   "private": true,
-  "version": "0.0.12",
+  "version": "0.0.13",
   "type": "module",
   "scripts": {
     "dev": "mkdir -p \"$HOME/Library/Application Support/bok-test-chrome\" && wxt",
@@ -12,6 +12,8 @@
     "zip": "pnpm build",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
+    "check:reading-list": "jiti scripts/check-reading-list.mjs",
+    "check:reading-list-background": "jiti scripts/check-reading-list-background.mjs",
     "check:session-import": "jiti scripts/check-session-import.mjs",
     "check:session-operations": "jiti scripts/check-session-operations.mjs",
     "check:bookmark-backup": "jiti scripts/check-bookmark-backup.mjs",

@@ -30,7 +30,6 @@ import type { SavedPageResponse } from '../../libs/saved-pages/messages';
 import {
   getSavedPagesAutoArchivePeriod,
   SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY,
-  THEME_PREFERENCE_KEY,
 } from '../../libs/saved-pages/settings';
 import {
   getDefaultBookmarkFolderSettings,
@@ -38,8 +37,8 @@ import {
   setDefaultBookmarkFolderId,
   type DefaultBookmarkFolderSettings,
 } from '../../libs/bookmarks/default-folder';
+import { useBokTheme } from '../shared/useBokTheme';
 
-type Theme = 'light' | 'dark';
 type DirectoryPermission = 'granted' | 'denied' | 'prompt' | 'missing';
 type Notice = { type: 'success' | 'error'; message: string };
 type SettingsSection =
@@ -49,20 +48,8 @@ type SettingsSection =
   | 'backup'
   | 'import';
 
-const THEME_STORAGE_KEY = 'bok-theme';
 const BACKUP_DEVICE_NAME_PATTERN = /^[a-z0-9_-]{1,32}$/;
 const NOTICE_EXIT_DURATION_MS = 120;
-
-function getStoredTheme(): Theme | null {
-  const value = localStorage.getItem(THEME_STORAGE_KEY);
-  return value === 'light' || value === 'dark' ? value : null;
-}
-
-function getSystemTheme(): Theme {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
-    ? 'dark'
-    : 'light';
-}
 
 function getSettingsSection(): SettingsSection {
   if (window.location.hash === '#import-settings') return 'import';
@@ -71,9 +58,6 @@ function getSettingsSection(): SettingsSection {
   if (window.location.hash === '#bookmark-settings') return 'bookmarks';
   return 'machine';
 }
-
-const storedTheme = getStoredTheme();
-if (storedTheme) document.documentElement.dataset.theme = storedTheme;
 
 const EMPTY_BOOKMARK_FOLDER_SETTINGS: DefaultBookmarkFolderSettings = {
   configuredFolderId: null,
@@ -160,8 +144,9 @@ export default function SettingsPage() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const deviceNameInputRef = useRef<HTMLInputElement>(null);
   const deviceNameEditButtonRef = useRef<HTMLButtonElement>(null);
-  const [theme, setTheme] = useState<Theme | null>(storedTheme);
-  const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
+  const { theme: activeTheme, toggleTheme } = useBokTheme({
+    forceBackupOnWrite: true,
+  });
   const [autoArchivePeriod, setAutoArchivePeriod] =
     useState<SavedPagesAutoArchivePeriod>(7);
   const [bookmarkFolderSettings, setBookmarkFolderSettings] =
@@ -176,8 +161,6 @@ export default function SettingsPage() {
   const [backupDeviceNameError, setBackupDeviceNameError] = useState('');
   const [canTakeOverBackupDeviceName, setCanTakeOverBackupDeviceName] =
     useState(false);
-  const activeTheme = theme ?? systemTheme;
-
   const refresh = useCallback(async () => {
     const [
       nextState,
@@ -239,47 +222,6 @@ export default function SettingsPage() {
   }, [refresh]);
 
   useEffect(() => {
-    let cancelled = false;
-    const legacyTheme = getStoredTheme();
-
-    void browser.storage.local
-      .get(THEME_PREFERENCE_KEY)
-      .then((stored) => {
-        if (legacyTheme) {
-          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
-          return browser.storage.local.set({
-            [THEME_PREFERENCE_KEY]: legacyTheme,
-          }).then(triggerForceBackup);
-        }
-
-        const preference = stored[THEME_PREFERENCE_KEY];
-        if (
-          cancelled ||
-          (preference !== 'light' && preference !== 'dark')
-        ) {
-          return;
-        }
-        localStorage.setItem(THEME_STORAGE_KEY, preference);
-        document.documentElement.dataset.theme = preference;
-        setTheme(preference);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = (event: MediaQueryListEvent) => {
-      setSystemTheme(event.matches ? 'dark' : 'light');
-    };
-    mediaQuery.addEventListener('change', onChange);
-    return () => mediaQuery.removeEventListener('change', onChange);
-  }, []);
-
-  useEffect(() => {
     function onHashChange() {
       setActiveSection(getSettingsSection());
     }
@@ -303,17 +245,6 @@ export default function SettingsPage() {
     );
     return () => window.clearTimeout(timeoutId);
   }, [notice, renderedNotice]);
-
-  function toggleTheme() {
-    const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = nextTheme;
-    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-    setTheme(nextTheme);
-    void browser.storage.local
-      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
-      .then(triggerForceBackup)
-      .catch(() => undefined);
-  }
 
   async function changeAutoArchivePeriod(event: ChangeEvent<HTMLSelectElement>) {
     const value = event.currentTarget.value;
@@ -506,7 +437,7 @@ export default function SettingsPage() {
     }
     setNotice({
       type: 'success',
-      message: '四份最新备份已更新；本机和共享每周历史包已按规则处理。',
+      message: '五份最新备份已更新；本机和共享每周历史包已按规则处理。',
     });
     await refresh();
   }
@@ -653,6 +584,11 @@ export default function SettingsPage() {
           type: 'success',
           message: `已新增 ${result.importedArchives} 个归档，共 ${result.importedBookmarks} 个书签。`,
         });
+      } else if (result.kind === 'reading-list') {
+        setNotice({
+          type: 'success',
+          message: `已导入 ${result.importedItems} 篇收藏；跳过 ${result.skippedDuplicateUrls} 个重复 URL${result.regeneratedIds > 0 ? `；${result.regeneratedIds} 条记录因 ID 冲突已生成新 ID` : ''}。`,
+        });
       } else {
         setNotice({
           type: 'success',
@@ -691,7 +627,6 @@ export default function SettingsPage() {
             type="button"
             className="theme-toggle"
             aria-label={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
-            aria-pressed={activeTheme === 'dark'}
             title={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
             onClick={toggleTheme}
           >
@@ -1051,6 +986,9 @@ export default function SettingsPage() {
                   {state?.lastSavedPagesBackupFileName && (
                     <small>已保存网页：{state.lastSavedPagesBackupFileName}</small>
                   )}
+                  {state?.lastReadingListBackupFileName && (
+                    <small>好文收藏：{state.lastReadingListBackupFileName}</small>
+                  )}
                   {state?.lastSettingsBackupFileName && (
                     <small>本机设置：{state.lastSettingsBackupFileName}</small>
                   )}
@@ -1099,9 +1037,9 @@ export default function SettingsPage() {
                 <div>
                   <strong>每日最新备份，每周保留历史</strong>
                   <p>
-                    本机的已保存网页和设置、共享的 Chrome 书签和书签归档分别写入四份
+                    本机的已保存网页和设置、共享的好文收藏、Chrome 书签和书签归档分别写入五份
                     最新备份，每天覆盖。每周第一次成功备份时，本机和共享数据分别打包为
-                    ZIP，每台电脑每类最多保留最近 10 份。只有四份文件全部写入并校验成功才算完成；
+                    ZIP，每台电脑每类最多保留最近 10 份。只有五份文件全部写入并校验成功才算完成；
                     失败后当天继续尝试。归档和恢复时还会立即更新共享归档文件。
                   </p>
                 </div>
@@ -1139,12 +1077,12 @@ export default function SettingsPage() {
           >
             <div className="settings-section__heading">
               <h2 id="import-heading">导入数据</h2>
-              <p>导入 Bok 保存网页或书签归档 JSON。</p>
+              <p>导入 Bok 保存网页、好文收藏或书签归档 JSON。</p>
             </div>
             <div className="settings-import">
               <div>
-                <strong>导入保存网页或归档库</strong>
-                <p>保存网页按分组去重合并；归档记录始终作为新内容追加。</p>
+                <strong>导入保存网页、好文收藏或归档库</strong>
+                <p>保存网页按分组去重合并；好文收藏按完整 URL 去重；归档记录始终作为新内容追加。</p>
               </div>
               <input
                 ref={importInputRef}

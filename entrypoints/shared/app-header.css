@@ -1,0 +1,325 @@
+:root {
+  --app-shell-width: 1320px;
+  --app-shell-gutter: 40px;
+  --topbar-height: 64px;
+  --app-sidebar-width: 248px;
+  --app-content-gap: 24px;
+}
+
+html {
+  scrollbar-gutter: stable both-edges;
+}
+
+.app-header {
+  --app-background: var(--background, var(--reading-background));
+  --app-surface: var(--surface, var(--reading-surface));
+  --app-surface-subtle: var(--surface-subtle, var(--reading-surface-subtle));
+  --app-text: var(--text, var(--reading-text));
+  --app-text-muted: var(--text-muted, var(--reading-text-muted));
+  --app-border: var(--border, var(--reading-border));
+  --app-border-strong: var(--border-strong, var(--reading-border-strong));
+  --app-accent: var(--accent, var(--reading-accent));
+  --app-accent-hover: var(--accent-hover, var(--reading-accent-hover));
+  --app-accent-soft: var(--accent-soft, var(--reading-accent-soft));
+  --app-focus: var(--focus, var(--reading-focus));
+  --app-header-height: var(--topbar-height);
+
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  box-sizing: border-box;
+  block-size: var(--app-header-height);
+  border-bottom: 1px solid var(--app-border);
+  color: var(--app-text);
+  background: var(--app-surface);
+}
+
+.app-header__inner {
+  display: grid;
+  box-sizing: border-box;
+  inline-size: min(calc(100% - var(--app-shell-gutter)), var(--app-shell-width));
+  block-size: 100%;
+  grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 16px;
+  margin: 0 auto;
+}
+
+.app-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--app-text);
+  font-size: 1rem;
+  font-weight: 720;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+.app-brand img {
+  display: block;
+  inline-size: 28px;
+  block-size: 28px;
+}
+
+.app-primary-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.app-primary-nav a {
+  display: inline-grid;
+  box-sizing: border-box;
+  inline-size: 36px;
+  block-size: 36px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  background: transparent;
+  text-decoration: none;
+}
+
+.app-primary-nav svg {
+  inline-size: 18px;
+  block-size: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.65;
+}
+
+.app-primary-nav a:hover {
+  color: var(--app-text);
+  background: var(--app-surface-subtle);
+}
+
+.app-primary-nav a[aria-current="page"] {
+  color: var(--app-accent-hover);
+  background: var(--app-accent-soft);
+}
+
+.app-primary-nav a:active {
+  color: var(--app-accent);
+  background: var(--app-accent-soft);
+}
+
+.app-search {
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+  min-inline-size: 0;
+  block-size: 38px;
+  align-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  background: var(--app-surface-subtle);
+}
+
+.app-search:focus-within {
+  border-color: var(--app-border-strong);
+}
+
+.app-search__icon {
+  position: absolute;
+  inset-inline-start: 11px;
+  inline-size: 16px;
+  block-size: 16px;
+  fill: none;
+  pointer-events: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+}
+
+.app-search input {
+  box-sizing: border-box;
+  inline-size: 100%;
+  block-size: 100%;
+  min-inline-size: 0;
+  padding: 0 11px 0 35px;
+  border: 0;
+  border-radius: inherit;
+  outline: 0;
+  color: var(--app-text);
+  background: transparent;
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.app-search input::placeholder {
+  color: var(--app-text-muted);
+  opacity: 1;
+}
+
+.app-search input:disabled {
+  cursor: not-allowed;
+  color: var(--app-text-muted);
+}
+
+.app-header__actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.app-header__actions::before {
+  position: absolute;
+  inset-inline-start: -9px;
+  inline-size: 1px;
+  block-size: 20px;
+  background: var(--app-border);
+  content: '';
+}
+
+.app-utility-link,
+.app-theme-toggle {
+  display: inline-grid;
+  box-sizing: border-box;
+  inline-size: 36px;
+  block-size: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--app-text-muted);
+  background: transparent;
+  font: inherit;
+}
+
+.app-utility-link:hover,
+.app-theme-toggle:hover {
+  color: var(--app-text);
+  background: var(--app-accent-soft);
+}
+
+.app-utility-link svg,
+.app-theme-toggle svg {
+  inline-size: 18px;
+  block-size: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.65;
+}
+
+.app-theme-toggle {
+  cursor: pointer;
+}
+
+.app-theme-toggle__glyph {
+  display: inline-grid;
+  place-items: center;
+}
+
+.app-theme-toggle__glyph svg {
+  grid-area: 1 / 1;
+}
+
+.app-theme-toggle__moon {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.app-theme-toggle__sun {
+  opacity: 0;
+  transform: scale(0.8);
+}
+
+.app-theme-toggle[data-theme="dark"] .app-theme-toggle__moon {
+  opacity: 0;
+  transform: scale(0.8);
+}
+
+.app-theme-toggle[data-theme="dark"] .app-theme-toggle__sun {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.app-header :is(a, button, input):focus-visible {
+  outline: 3px solid var(--app-focus);
+  outline-offset: 2px;
+}
+
+.app-header input:focus-visible {
+  outline-width: 2px;
+}
+
+.app-sr-only {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .app-primary-nav a {
+    transition:
+      color 120ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 120ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .app-primary-nav a:active {
+    transform: scale(0.96);
+  }
+
+  .app-theme-toggle__glyph svg {
+    transition: opacity 150ms ease, transform 150ms ease;
+  }
+}
+
+@media (forced-colors: active) {
+  .app-header :is(a, button, input):focus-visible {
+    outline-color: CanvasText;
+  }
+}
+
+@media (max-width: 860px) {
+  :root {
+    --topbar-height: 112px;
+  }
+
+  .app-header {
+    --app-header-height: 112px;
+  }
+
+  .app-header__inner {
+    grid-template-areas:
+      'brand nav actions'
+      'search search search';
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 56px minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 0;
+  }
+
+  .app-brand {
+    grid-area: brand;
+  }
+
+  .app-primary-nav {
+    grid-area: nav;
+    justify-self: end;
+  }
+
+  .app-search {
+    grid-area: search;
+    inline-size: 100%;
+    align-self: center;
+  }
+
+  .app-header__actions {
+    grid-area: actions;
+  }
+}

@@ -20,14 +20,14 @@ import type {
   TaskStatus,
 } from '../../libs/saved-pages/model';
 import { readSessions } from '../../libs/saved-pages/persistence';
-import { THEME_PREFERENCE_KEY } from '../../libs/saved-pages/settings';
+import { AppHeader } from '../shared/AppHeader';
+import { useBokTheme } from '../shared/useBokTheme';
 
 type TaskFilter = 'all' | TaskStatus;
 type OpenGroupOptions = {
   mode: 'tabs' | 'tab-group';
   destination: 'current-window' | 'new-window';
 };
-type Theme = 'light' | 'dark';
 type ArchiveView = 'current' | 'archived';
 type ManagedGroup = SavedGroup & { sessionId: string };
 type ManagedSessionItem =
@@ -67,8 +67,6 @@ type DraggedTab = {
   sourceGroupId: string | null;
 };
 type TaskCounts = Record<TaskStatus, { sessions: number; groups: number; tabs: number }>;
-
-const THEME_STORAGE_KEY = 'bok-theme';
 
 const TASK_FILTERS: Array<{ value: TaskFilter; label: string }> = [
   { value: 'all', label: '全部标签' },
@@ -203,18 +201,6 @@ function getContentTitle(archiveView: ArchiveView, taskFilter: TaskFilter): stri
   }
   return taskFilter === 'all' ? '全部标签' : `${taskLabel} 任务`;
 }
-
-function getStoredTheme(): Theme | null {
-  const value = localStorage.getItem(THEME_STORAGE_KEY);
-  return value === 'light' || value === 'dark' ? value : null;
-}
-
-function getSystemTheme(): Theme {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
-
-const storedTheme = getStoredTheme();
-if (storedTheme) document.documentElement.dataset.theme = storedTheme;
 
 function normalizeSearchText(value: string): string {
   return value.normalize('NFKC').toLowerCase();
@@ -446,7 +432,6 @@ export default function BokPage() {
   const [draggedTab, setDraggedTab] = useState<DraggedTab | null>(null);
   const [dropTarget, setDropTarget] = useState<TabMoveTarget | null>(null);
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
-  const [openingBookmarkManager, setOpeningBookmarkManager] = useState(false);
   const [editingGroupId, setEditingGroupId] = useState('');
   const [groupTitleDraft, setGroupTitleDraft] = useState('');
   const [editingSessionId, setEditingSessionId] = useState('');
@@ -466,15 +451,15 @@ export default function BokPage() {
   const savingSessionTitleIds = useRef(new Set<string>());
   const cancellingSessionTitleIds = useRef(new Set<string>());
   const openingCommandRef = useRef(false);
-  const [theme, setTheme] = useState<Theme | null>(storedTheme);
-  const [systemTheme, setSystemTheme] = useState<Theme>(getSystemTheme);
+  const { theme: activeTheme, toggleTheme } = useBokTheme({
+    forceBackupOnWrite: true,
+  });
   const [collapsedSessionIds, setCollapsedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(
     () => new Set(),
   );
-  const activeTheme = theme ?? systemTheme;
   const deferredSearchValue = useDeferredValue(searchValue);
   const searchTerms = useMemo(
     () =>
@@ -619,54 +604,6 @@ export default function BokPage() {
     const timeoutId = window.setTimeout(() => setActionNotice(null), 5500);
     return () => window.clearTimeout(timeoutId);
   }, [actionNotice]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const legacyTheme = getStoredTheme();
-
-    void browser.storage.local
-      .get(THEME_PREFERENCE_KEY)
-      .then((stored) => {
-        if (legacyTheme) {
-          if (stored[THEME_PREFERENCE_KEY] === legacyTheme) return;
-          return browser.storage.local
-            .set({ [THEME_PREFERENCE_KEY]: legacyTheme })
-            .then(() =>
-              browser.runtime.sendMessage({
-                type: 'bok/bookmark-backup',
-                force: true,
-              }),
-            );
-        }
-
-        const preference = stored[THEME_PREFERENCE_KEY];
-        if (
-          cancelled ||
-          (preference !== 'light' && preference !== 'dark')
-        ) {
-          return;
-        }
-        localStorage.setItem(THEME_STORAGE_KEY, preference);
-        document.documentElement.dataset.theme = preference;
-        setTheme(preference);
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-
-    function handleThemeChange(event: MediaQueryListEvent) {
-      setSystemTheme(event.matches ? 'dark' : 'light');
-    }
-
-    mediaQuery.addEventListener('change', handleThemeChange);
-    return () => mediaQuery.removeEventListener('change', handleThemeChange);
-  }, []);
 
   useEffect(() => {
     if (!openMenuGroupId) return;
@@ -1543,53 +1480,6 @@ export default function BokPage() {
     }
   }
 
-  function toggleTheme() {
-    const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = nextTheme;
-    localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
-    setTheme(nextTheme);
-    void browser.storage.local
-      .set({ [THEME_PREFERENCE_KEY]: nextTheme })
-      .then(() =>
-        browser.runtime.sendMessage({
-          type: 'bok/bookmark-backup',
-          force: true,
-        }),
-      )
-      .catch(() => undefined);
-  }
-
-  async function openBookmarkManager() {
-    if (openingBookmarkManager) return;
-    setOpeningBookmarkManager(true);
-    try {
-      const granted = await browser.permissions.request({
-        permissions: ['bookmarks'],
-      });
-      if (!granted) {
-        setActionNotice({
-          type: 'error',
-          message: '未授予书签权限，标签页快速保存不受影响。',
-        });
-        return;
-      }
-
-      const managerUrl = browser.runtime.getURL('/bookmark-manager.html');
-      const existing = await browser.tabs.query({ url: managerUrl });
-      const reusable = existing.find((tab) => tab.id != null);
-      if (reusable?.id != null) {
-        await browser.windows.update(reusable.windowId, { focused: true });
-        await browser.tabs.update(reusable.id, { active: true });
-      } else {
-        await browser.tabs.create({ url: managerUrl, active: true });
-      }
-    } catch (error) {
-      showCommandError('打开书签管理', error);
-    } finally {
-      setOpeningBookmarkManager(false);
-    }
-  }
-
   async function openGroup(
     group: ManagedGroup,
     options: OpenGroupOptions,
@@ -2292,63 +2182,17 @@ export default function BokPage() {
         跳到标签列表
       </a>
 
-      <header className="topbar">
-        <div className="topbar__inner">
-          <a className="brand" href="#saved-groups" aria-label="Bok 首页">
-            <img src="/bok.svg" alt="" />
-            <span>Bok</span>
-          </a>
-
-          <label className="search-field">
-            <span className="sr-only">搜索标签</span>
-            <svg viewBox="0 0 20 20" aria-hidden="true">
-              <circle cx="8.5" cy="8.5" r="5.5" />
-              <path d="m12.5 12.5 4 4" />
-            </svg>
-            <input
-              type="search"
-              value={searchValue}
-              placeholder="搜索标题或 URL"
-              autoComplete="off"
-              spellCheck={false}
-              onChange={(event) => setSearchValue(event.target.value)}
-            />
-          </label>
-
-          <div className="topbar__actions">
-            <button
-              type="button"
-              className="bookmark-manager-entry"
-              disabled={openingBookmarkManager}
-              onClick={() => void openBookmarkManager()}
-            >
-              {openingBookmarkManager ? '打开中…' : '书签管理'}
-            </button>
-            <a className="topbar__link" href="/options.html">
-              设置
-            </a>
-            <button
-              type="button"
-              className="theme-toggle"
-              aria-label={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
-              aria-pressed={activeTheme === 'dark'}
-              title={activeTheme === 'dark' ? '切换到浅色模式' : '切换到深色模式'}
-              onClick={toggleTheme}
-            >
-              {activeTheme === 'dark' ? (
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <circle cx="10" cy="10" r="3.25" />
-                  <path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" />
-                </svg>
-              ) : (
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M16.5 12.2A6.6 6.6 0 0 1 7.8 3.5a6.6 6.6 0 1 0 8.7 8.7Z" />
-                </svg>
-              )}
-            </button>
-          </div>
-        </div>
-      </header>
+      <AppHeader
+        activeSection="saved"
+        search={{
+          label: '搜索标签',
+          placeholder: '搜索标题或 URL',
+          value: searchValue,
+          onChange: (event) => setSearchValue(event.target.value),
+        }}
+        theme={activeTheme}
+        onToggleTheme={toggleTheme}
+      />
 
       <div className="workspace">
         <aside className="sidebar" aria-label="标签导航">

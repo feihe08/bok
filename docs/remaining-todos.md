@@ -5,10 +5,11 @@
 
 ## 数据安全与稳定性
 
-- Chrome 书签栏、Bok 书签归档、按电脑区分的 Saved pages 和当前设置已支持写入本机或
-  iCloud Drive；从备份文件预览和恢复数据仍需后续实现。
-- 共享文件只依赖本机或 iCloud Drive 的文件传播；Bok 尚不提供归档库的实时跨设备同步、
-  自动合并或离线并发冲突解决。
+- Chrome 书签栏、Bok 书签归档、共享的好文列表、按电脑区分的 Saved pages 和当前设置
+  已支持写入本机或 iCloud Drive；Saved pages、好文和书签归档 JSON 已支持合并导入，
+  完整预览以及设置、Chrome 书签和每周 ZIP 恢复仍需后续实现。
+- 共享文件只依赖本机或 iCloud Drive 的文件传播；Bok 尚不提供好文列表或归档库的实时
+  跨设备同步、自动合并或离线并发冲突解决。
 - 已有 `check:session-import`、`check:session-operations` 与 `check:bookmark-backup`
   存储/命令级回归脚本；仍需补充真实 Chrome 中的保存/关闭、Session 打开与回滚、
   任务标签组同步，以及 BokPage UI 自动化测试。

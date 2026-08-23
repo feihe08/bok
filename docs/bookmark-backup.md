@@ -1,7 +1,7 @@
 # Bok 本地备份
 
 本文档定义 Bok 的本地备份格式与执行规则。备份按数据是否随电脑变化分为两部分：
-Saved pages 和当前设置按机器名称隔离；Chrome 书签栏和 Bok 书签归档写入共享目录。
+Saved pages 和当前设置按机器名称隔离；阅读列表、Chrome 书签栏和 Bok 书签归档写入共享目录。
 共享目录只是用户所选文件夹中的备份，不等同于 Bok 实时同步。
 
 ## 范围
@@ -11,10 +11,12 @@ Saved pages 和当前设置按机器名称隔离；Chrome 书签栏和 Bok 书�
 - 备份 `browser.storage.local.sessions` 中所有有效的 Bok 保存记录，包括当前和归档的
   Session、真实 Chrome 标签组和独立标签，以及 Session/Group/Tab 的任务状态、
   Session/Group 的固定与锁定、Chrome Group 颜色、标签和目录字段。
+- 备份 `browser.storage.local.readingList` 中所有有效的长期好文收藏和纯文本备注。
 - 备份 `browser.storage.local.bookmarkArchiveStore` 中由用户明确归档的完整文件夹树。
 - 用户通过设置页选择一个本机或 iCloud Drive 文件夹，并为当前电脑设置唯一的机器名称。
 - 备份当前自动归档周期和主题设置。
-- 设置页可以导入 `bok-saved-pages.json` 和 `bok-bookmark-archive.json`；当前不支持
+- 设置页可以导入 `bok-saved-pages.json`、`bok-reading-list.json` 和
+  `bok-bookmark-archive.json`；当前不支持
   直接导入设置、Chrome 书签备份或每周 ZIP。
 
 ## 目录布局
@@ -32,13 +34,14 @@ Saved pages 和当前设置按机器名称隔离；Chrome 书签栏和 Bok 书�
         bok-device-weekly-backup-personal-GENERATION-YYYY-MM-DD.zip
   shared/
     bok-bookmarks.json
+    bok-reading-list.json
     bok-bookmark-archive.json
     history/
       bok-shared-weekly-backup-personal-GENERATION-YYYY-MM-DD.zip
 ```
 
 `devices/personal/` 只由名称为 `personal` 且持有匹配归属信息的安装写入。共享目录中的
-两个最新 JSON 使用固定文件名；多台电脑写入时，以文件系统最终完成的写入为准。共享
+三个最新 JSON 使用固定文件名；多台电脑写入时，以文件系统最终完成的写入为准。共享
 周包包含写入设备名称和认领代次，避免重命名或重新绑定覆盖已有周包。
 
 每个自然周第一次成功备份时，本机数据和共享数据分别生成一个 ZIP。每台电脑只清理
@@ -51,7 +54,7 @@ Saved pages 和当前设置按机器名称隔离；Chrome 书签栏和 Bok 书�
 - 名称是 `devices/<name>/` 的目录 key，在同一个备份根目录中必须唯一。
 - 本机生成一个不在设置界面展示的随机 `claimId`；`device.json` 保存名称和 claim，用于
   防止两台电脑意外使用同一个 key。
-- 每次备份前都会重新验证 claim。名称已被其他安装占用时不会写入 Saved pages 或设置。
+- 每次备份前都会重新验证 claim。名称已被其他安装占用时不会写入任何本机或共享备份。
 - “重新绑定此名称”会在用户确认后生成新 claim；旧安装之后会因为归属不匹配而停止写入。
 - 不同认领代次的周包使用不同文件名；重新绑定不会覆盖旧代次已有的周包。
 - 重命名会创建并认领新目录，旧目录和旧快照保留，不自动删除。
@@ -109,6 +112,21 @@ v1/v2 备份仍可导入，但会在导入过程中迁移到 v3，不会以 lega
 真实 Chrome Group 保留在原 Session 并维持可确定的原顺序。首次把本机旧数据写为
 v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快照。
 
+`bok-reading-list.json` 使用独立的 schema v1 envelope：
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "bok-reading-list",
+  "revision": 8,
+  "items": []
+}
+```
+
+每条收藏保存不可变 ID、完整 URL、收藏时标题、普通多行文本备注和创建/备注更新时间。
+同一完整 URL 只保留一条；导入时已有收藏优先，保留其原备注。favicon 在展示时根据 URL
+获取，不写入文件。
+
 `bok-settings.json` 使用独立的严格 envelope：
 
 ```json
@@ -145,6 +163,7 @@ v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快�
 - `deviceName`：当前电脑使用的机器名称；
 - `lastBackupFileName`：最近成功写入的共享 Chrome 书签文件路径；
 - `lastSavedPagesBackupFileName`：最近成功写入的本机 Bok 保存网页文件路径；
+- `lastReadingListBackupFileName`：最近成功写入的共享 Bok 好文收藏文件路径；
 - `lastSettingsBackupFileName`：最近成功写入的本机设置文件路径；
 - `lastArchiveBackupFileName`：最近成功写入的 Bok 书签归档文件名；
 - `lastWeeklyBackupAt` / `lastSuccessfulWeeklyBackupWeek`：最近一次每周历史备份时间和
@@ -162,7 +181,7 @@ v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快�
 1. 每次打开或激活 Bok 的标签页、书签或设置页面时请求后台执行；设置变化会请求强制备份。
 2. 如果当前名称、当天成功状态、本机/共享文件路径和两类周包状态都匹配，普通请求跳过。
 3. 检查目录句柄、写权限和当前 claim；冲突时停止，不写入本机数据。
-4. 生成本机 Saved pages、设置，以及共享 Chrome 书签栏、书签归档四份最新 JSON。
+4. 生成本机 Saved pages、设置，以及共享好文收藏、Chrome 书签栏、书签归档五份最新 JSON。
 5. 每个文件写入后都重新读取完整内容进行字节级校验。
 6. 本自然周尚未成功时，分别生成本机周包和共享周包，并只清理当前名称超出最近 10 份
    的对应周包。
