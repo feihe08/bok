@@ -19,15 +19,33 @@ change browser storage keys, schemas, or exported JSON formats.
 
 ## Test Chrome
 
-Run `pnpm dev` to open Bok in Chrome for Testing. WXT always uses the persistent
-profile at `~/Library/Application Support/bok-test-chrome`, so saved tabs survive
-browser restarts and extension reloads.
+Run `pnpm dev` to open Bok in Chrome for Testing. The primary checkout uses the
+persistent profile at `~/Library/Application Support/bok-test-chrome`, so saved
+tabs survive browser restarts and extension reloads. Linked feature worktrees use
+isolated temporary profiles instead, preventing parallel development sessions
+from sharing browser state; their browser data is discarded when the process exits.
 
 Bok data remains local to that browser profile in `browser.storage.local`. Do not
 remove the extension or delete the profile directory unless you intend to remove
 its saved data. Development and release builds use the same stable extension ID.
 Their data remains separate because `pnpm dev` uses a dedicated Chrome for Testing
 profile; do not load both builds into the same browser profile at the same time.
+
+## Parallel feature worktrees
+
+Use `pnpm worktree create <slug>` after the requirement is clear. The command
+creates `codex/<slug>` in the sibling `bok-worktrees/` directory and enforces a
+maximum of six linked worktrees; the primary checkout is not counted. Initialize
+the new worktree with `pnpm install --frozen-lockfile` and use `pnpm verify` for
+the baseline compile and non-release build.
+
+After independent review and verification, bind the merge to the checked commit
+with `pnpm worktree merge <slug> --verified-sha <sha>`. Then remove the merged
+worktree and its branch with `pnpm worktree close <slug>`. Use
+`pnpm worktree list` and `pnpm worktree doctor` for status. Ordinary verification
+must not use `pnpm build` or `pnpm zip`, because those commands perform a release.
+If a worktree directory was deleted manually, preview stale metadata cleanup with
+`pnpm worktree prune`; `--apply` requires explicit confirmation of that preview.
 
 ## Release builds
 

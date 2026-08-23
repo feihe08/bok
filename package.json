@@ -6,6 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "mkdir -p \"$HOME/Library/Application Support/bok-test-chrome\" && wxt",
+    "verify": "wxt prepare && pnpm compile && wxt build",
+    "worktree": "node scripts/worktree.mjs",
+    "check:worktree": "node scripts/check-worktree.mjs",
     "dev:firefox": "wxt -b firefox",
     "build": "pnpm compile && BOK_RELEASE_BUILD=1 wxt zip && node scripts/sync-release.mjs",
     "build:firefox": "wxt build -b firefox",
@@ -33,6 +36,7 @@
     "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "@wxt-dev/module-react": "^1.1.5",
+    "jiti": "^2.7.0",
     "typescript": "^5.9.3",
     "wxt": "^0.20.15"
   }
