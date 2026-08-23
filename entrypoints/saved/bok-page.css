@@ -79,6 +79,10 @@ main:focus-visible {
   outline-offset: 2px;
 }
 
+input:focus-visible {
+  outline-width: 2px;
+}
+
 button {
   color: inherit;
 }
