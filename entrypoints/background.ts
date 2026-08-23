@@ -23,6 +23,7 @@ import type {
   ImportDataResponse,
 } from '../libs/backup/model';
 import {
+  ensureSavedPageOnBrowserStartup,
   openOrFocusSavedPage,
   saveAndCloseTab,
   saveAndCloseTabToGroup,
@@ -64,6 +65,7 @@ const CODEX_BOOKMARK_BRIDGE_INTERVAL_MINUTES = 1;
 const TASK_GROUP_RECONCILE_DEBOUNCE_MS = 120;
 const GROUP_BINDING_RESTORE_DEBOUNCE_MS = 750;
 const BOOKMARK_DEFAULT_FOLDER_DEBOUNCE_MS = 250;
+const SAVED_PAGE_STARTUP_RESTORE_DELAY_MS = 1_000;
 const OPEN_BOK_MENU_ID = 'bok/open';
 const ADD_TO_READING_LIST_MENU_ID = 'bok/add-to-reading-list';
 const SAVE_ALL_MENU_ID = 'bok/save-all';
@@ -161,6 +163,8 @@ let contextMenuQueue = Promise.resolve();
 let taskGroupReconcileTimer: ReturnType<typeof setTimeout> | undefined;
 let groupBindingRestoreTimer: ReturnType<typeof setTimeout> | undefined;
 let bookmarkDefaultFolderTimer: ReturnType<typeof setTimeout> | undefined;
+let savedPageStartupRestoreTimer: ReturnType<typeof setTimeout> | undefined;
+let savedPageStartupRestoreActive = false;
 const readingListFeedbackTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const readingListFeedbackTokens = new Map<number, object>();
 const pendingTaskGroupAdoptionIds = new Set<number>();
@@ -174,6 +178,20 @@ function enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
     () => undefined,
   );
   return task;
+}
+
+function scheduleSavedPageStartupCheck(): void {
+  if (!savedPageStartupRestoreActive) return;
+  if (savedPageStartupRestoreTimer !== undefined) {
+    clearTimeout(savedPageStartupRestoreTimer);
+  }
+  savedPageStartupRestoreTimer = setTimeout(() => {
+    savedPageStartupRestoreTimer = undefined;
+    savedPageStartupRestoreActive = false;
+    void enqueueOperation(ensureSavedPageOnBrowserStartup).catch((error) => {
+      console.error('[bok] failed to open Bok after browser startup', error);
+    });
+  }, SAVED_PAGE_STARTUP_RESTORE_DELAY_MS);
 }
 
 function cancelReadingListFeedbackTimer(tabId: number): void {
@@ -535,6 +553,11 @@ export default defineBackground(() => {
     });
   });
 
+  browser.runtime.onStartup.addListener(() => {
+    savedPageStartupRestoreActive = true;
+    scheduleSavedPageStartupCheck();
+  });
+
   browser.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local' || changes.sessions === undefined) return;
     void queueContextMenuRefresh().catch((error) => {
@@ -572,7 +595,12 @@ export default defineBackground(() => {
     }
   });
 
+  browser.tabs.onCreated.addListener(scheduleSavedPageStartupCheck);
+
   browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (changeInfo.url !== undefined || changeInfo.status !== undefined) {
+      scheduleSavedPageStartupCheck();
+    }
     if (changeInfo.url !== undefined) clearReadingListFeedback(tabId);
     if (
       tab.groupId != null &&

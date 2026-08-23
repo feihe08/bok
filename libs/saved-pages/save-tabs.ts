@@ -110,6 +110,31 @@ export async function openOrFocusSavedPage(
   }
 }
 
+/** Keep Bok available after Chrome starts without stealing focus when restored. */
+export async function ensureSavedPageOnBrowserStartup(): Promise<void> {
+  const savedPageUrl = browser.runtime.getURL('/saved.html');
+  const existing = (await browser.tabs.query({})).filter(
+    (tab) => tab.url === savedPageUrl || tab.pendingUrl === savedPageUrl,
+  );
+
+  if (existing.length === 0) {
+    await browser.tabs.create({
+      url: savedPageUrl,
+      active: true,
+      pinned: true,
+    });
+    return;
+  }
+
+  await Promise.all(
+    existing.flatMap((tab) =>
+      tab.id != null && !tab.pinned
+        ? [browser.tabs.update(tab.id, { pinned: true })]
+        : [],
+    ),
+  );
+}
+
 async function saveAndCloseSelection(
   windowId: number,
   selectedTabs: Tab[],

@@ -28,6 +28,15 @@ async function flushAsyncWork() {
   }
 }
 
+async function waitForAsyncWork(delayMs) {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  await flushAsyncWork();
+}
+
+async function waitForStartupWork() {
+  await waitForAsyncWork(1_100);
+}
+
 let backgroundSetup;
 globalThis.defineBackground = (setup) => {
   backgroundSetup = setup;
@@ -35,19 +44,23 @@ globalThis.defineBackground = (setup) => {
 };
 
 const installed = createEvent();
+const startup = createEvent();
 const contextMenuClicked = createEvent();
+const tabCreated = createEvent();
 const tabUpdated = createEvent();
 const actionClicked = createEvent();
 const menuDefinitions = [];
 const badgeUpdates = [];
 const titleUpdates = [];
 fakeBrowser.runtime.onInstalled = installed;
+fakeBrowser.runtime.onStartup = startup;
 fakeBrowser.runtime.onMessage = createEvent();
 fakeBrowser.storage.onChanged = createEvent();
 fakeBrowser.alarms.onAlarm = createEvent();
 fakeBrowser.alarms.get = async () => undefined;
 fakeBrowser.alarms.create = async () => undefined;
 fakeBrowser.alarms.clear = async () => undefined;
+fakeBrowser.tabs.onCreated = tabCreated;
 fakeBrowser.tabs.onUpdated = tabUpdated;
 fakeBrowser.tabs.onActivated = createEvent();
 fakeBrowser.tabs.onMoved = createEvent();
@@ -79,6 +92,8 @@ fakeBrowser.tabGroups = {
 
 const tabsById = new Map();
 const createdTabs = [];
+const updatedTabs = [];
+const updatedWindows = [];
 let tabGetCalls = 0;
 
 fakeBrowser.tabs.get = async (tabId) => {
@@ -89,7 +104,7 @@ fakeBrowser.tabs.query = async (query) => {
   if (query.url) {
     return [...tabsById.values()].filter((tab) => tab.url === query.url);
   }
-  return [];
+  return [...tabsById.values()];
 };
 fakeBrowser.tabs.create = async (details) => {
   const tab = {
@@ -100,6 +115,15 @@ fakeBrowser.tabs.create = async (details) => {
   };
   createdTabs.push(tab);
   return tab;
+};
+fakeBrowser.tabs.update = async (tabId, details) => {
+  updatedTabs.push({ tabId, details });
+  const tab = tabsById.get(tabId);
+  if (tab) Object.assign(tab, details);
+  return tab;
+};
+fakeBrowser.windows.update = async (windowId, details) => {
+  updatedWindows.push({ windowId, details });
 };
 const {
   addReadingListTabSnapshot,
@@ -262,6 +286,60 @@ assert.match(
   backgroundSource,
   /browser\.action\.onClicked\.addListener\(async \(tab\) => \{[\s\S]*?enqueueOperation\(\(\) => saveAndCloseTabs\(tab\.windowId\)\)/,
 );
+
+const createdBeforeEmptyStartup = createdTabs.length;
+startup.emit();
+await waitForStartupWork();
+assert.equal(createdTabs.length, createdBeforeEmptyStartup + 1);
+assert.deepEqual(createdTabs.at(-1), {
+  id: 100 + createdBeforeEmptyStartup,
+  windowId: 10,
+  groupId: -1,
+  url: 'chrome-extension://bok/saved.html',
+  active: true,
+  pinned: true,
+});
+
+const restoredTab = {
+  id: 21,
+  windowId: 20,
+  active: false,
+  pinned: false,
+};
+const createdBeforeRestoredStartup = createdTabs.length;
+const updatedBeforeRestoredStartup = updatedTabs.length;
+const windowsBeforeRestoredStartup = updatedWindows.length;
+startup.emit();
+await waitForAsyncWork(600);
+tabsById.set(restoredTab.id, restoredTab);
+tabCreated.emit(restoredTab);
+await waitForAsyncWork(600);
+restoredTab.pendingUrl = 'chrome-extension://bok/saved.html';
+tabsById.set(22, {
+  id: 22,
+  windowId: 30,
+  url: 'chrome-extension://bok/saved.html',
+  active: false,
+  pinned: true,
+});
+tabUpdated.emit(restoredTab.id, { status: 'loading' }, restoredTab);
+await waitForAsyncWork(600);
+assert.equal(
+  createdTabs.length,
+  createdBeforeRestoredStartup,
+  'each restore event must reset the startup quiet window',
+);
+assert.equal(updatedTabs.length, updatedBeforeRestoredStartup);
+await waitForAsyncWork(500);
+assert.equal(createdTabs.length, createdBeforeRestoredStartup);
+assert.deepEqual(updatedTabs.slice(updatedBeforeRestoredStartup), [
+  { tabId: 21, details: { pinned: true } },
+]);
+assert.equal(updatedWindows.length, windowsBeforeRestoredStartup);
+assert.equal(tabsById.get(21).active, false);
+assert.equal(tabsById.get(22).active, false);
+
+tabsById.clear();
 const createdBeforeActionClick = createdTabs.length;
 actionClicked.emit({ id: 12, windowId: 10 });
 await flushAsyncWork();
