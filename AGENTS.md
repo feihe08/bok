@@ -16,9 +16,12 @@
 
 ## Releases
 
-- Every Bok release must follow the repository's current release workflow and synchronize both the unpacked extension and ZIP package to the iCloud release directory through `scripts/sync-release.mjs`.
-- A release is not complete until the local and iCloud artifacts have been synchronized and verified. If iCloud access is blocked by the execution sandbox or permissions, request the required access and retry; do not report the release as complete.
-- A local development build or verification build is not a release and does not require iCloud synchronization unless the user explicitly requests a release.
+- Treat `.output/` artifacts as development builds and artifacts in the iCloud release directory as formal release builds. Their contents must be identical; the distinction is release status, not code or configuration.
+- A request to "build", "build the latest version", or create a development build means build only the local `.output/` artifacts. Do not access or synchronize the iCloud release directory for these requests, even when the user specifies a version number.
+- Start a formal release only when the user explicitly asks to "release" or "publish" Bok. Do not infer release authorization from a build request, version request, commit, merge, or completed verification.
+- Every formal release must build both the local `.output/` development artifacts and the matching iCloud formal-release artifacts from the same source, then verify that their unpacked extensions and ZIP packages are identical.
+- Formal releases must follow the repository's current release workflow and synchronize both the unpacked extension and ZIP package to the iCloud release directory through `scripts/sync-release.mjs`.
+- A release is not complete until the local and iCloud artifacts have been built, synchronized, and verified. If iCloud access is blocked by the execution sandbox or permissions, request the required access and retry; do not report the release as complete.
 
 ## Parallel Feature Worktrees
 
