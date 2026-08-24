@@ -473,7 +473,7 @@ export default function ReadingListPage() {
                             aria-disabled={isSaving}
                             onClick={() => void saveNote(item)}
                           >
-                            {isSaving ? '保存中…' : '保存备注'}
+                            {isSaving ? '保存中…' : '保存'}
                           </button>
                           <button
                             type="button"
@@ -523,7 +523,7 @@ export default function ReadingListPage() {
                             aria-disabled={isDeleting}
                             onClick={() => void deleteItem(item)}
                           >
-                            {isDeleting ? '删除中…' : '确认删除'}
+                            {isDeleting ? '删除中…' : '删除'}
                           </button>
                           <button
                             type="button"

@@ -728,7 +728,7 @@ export default function SettingsPage() {
                           className="secondary-button"
                           disabled={Boolean(busy)}
                         >
-                          {busy === 'device-name' ? '保存中…' : '保存名称'}
+                          {busy === 'device-name' ? '保存中…' : '保存'}
                         </button>
                         <button
                           type="button"
