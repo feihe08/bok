@@ -131,6 +131,11 @@ button {
     border-color 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.reading-random-button {
+  min-height: 32px;
+  padding: 5px 9px;
+}
+
 .reading-random-button:hover:not(:disabled),
 .reading-random-button:focus-visible:not(:disabled),
 .reading-empty-action:hover,
@@ -149,8 +154,8 @@ button {
 }
 
 .reading-random-button svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -173,9 +178,10 @@ button {
 .reading-item {
   display: grid;
   min-height: 72px;
-  grid-template-columns: 36px minmax(0, 1.35fr) 96px minmax(0, 0.7fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr) 96px auto;
   align-items: center;
-  gap: 16px;
+  column-gap: 16px;
+  row-gap: 2px;
   padding: 9px 20px 9px 0;
 }
 
@@ -263,12 +269,30 @@ button {
 }
 
 .reading-item__note {
+  grid-column: 2 / -1;
+  display: block;
+  width: 100%;
+  padding: 0 0 4px;
+  border: 0;
   color: var(--reading-text-muted);
+  background: transparent;
   font-size: 0.8125rem;
   line-height: 1.6;
+  text-align: start;
+  cursor: pointer;
 }
 
-.reading-item__note p {
+.reading-item__note:hover:not(:disabled),
+.reading-item__note:focus-visible:not(:disabled) {
+  color: var(--reading-accent-hover);
+}
+
+.reading-item__note:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.reading-item__note-text {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;

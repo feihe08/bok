@@ -195,7 +195,7 @@ export default function ReadingListPage() {
     });
   }
 
-  function focusItemAction(itemId: string, action: 'edit' | 'delete') {
+  function focusItemAction(itemId: string, action: 'note' | 'delete') {
     requestAnimationFrame(() =>
       document.getElementById(`reading-item-${action}-${itemId}`)?.focus(),
     );
@@ -217,7 +217,7 @@ export default function ReadingListPage() {
   function cancelEditing(itemId: string) {
     setEditingId('');
     setNoteDraft('');
-    focusItemAction(itemId, 'edit');
+    focusItemAction(itemId, 'note');
   }
 
   async function saveNote(item: ReadingListItem) {
@@ -242,7 +242,7 @@ export default function ReadingListPage() {
       setNoteDraft('');
       if (shouldRestoreFocus) {
         setPendingFocus({
-          targetId: `reading-item-edit-${item.id}`,
+          targetId: `reading-item-note-${item.id}`,
           fallbackId: 'reading-list-content',
         });
       }
@@ -425,23 +425,7 @@ export default function ReadingListPage() {
                     >
                       {formatSavedDate(item.createdAt)}
                     </time>
-                    <div
-                      id={noteId}
-                      className={`reading-item__note${item.note ? '' : ' reading-item__note--empty'}`}
-                    >
-                      <p>{item.note || '尚未添加备注'}</p>
-                    </div>
                     <div className="reading-item__actions" role="group" aria-label={`“${displayTitle}”的操作`}>
-                      <button
-                        id={`reading-item-edit-${item.id}`}
-                        type="button"
-                        className="reading-item__action"
-                        disabled={Boolean(savingId || deletingId)}
-                        aria-label={`编辑“${displayTitle}”的备注`}
-                        onClick={() => startEditing(item)}
-                      >
-                        编辑备注
-                      </button>
                       <button
                         id={`reading-item-delete-${item.id}`}
                         type="button"
@@ -454,9 +438,9 @@ export default function ReadingListPage() {
                       </button>
                     </div>
 
-                    {isEditing && (
+                    {isEditing ? (
                       <div
-                        id={`reading-item-editor-${item.id}`}
+                        id={noteId}
                         className="reading-item__editor"
                       >
                         <label id={noteLabelId} htmlFor={`reading-note-${item.id}`}>给未来的自己留一句备注</label>
@@ -501,6 +485,19 @@ export default function ReadingListPage() {
                           </button>
                         </div>
                       </div>
+                    ) : (
+                      <button
+                        id={noteId}
+                        type="button"
+                        className={`reading-item__note${item.note ? '' : ' reading-item__note--empty'}`}
+                        disabled={Boolean(savingId || deletingId)}
+                        aria-label={`编辑“${displayTitle}”的备注：${item.note || '尚未添加备注'}`}
+                        onClick={() => startEditing(item)}
+                      >
+                        <span className="reading-item__note-text">
+                          {item.note || '尚未添加备注'}
+                        </span>
+                      </button>
                     )}
 
                     {isConfirmingDelete && (
