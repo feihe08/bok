@@ -958,11 +958,25 @@ export default function BokPage() {
     return response.result;
   }
 
-  async function deleteTab(groupId: string, tabId: string) {
+  async function deleteTab(
+    groupId: string,
+    tabId: string,
+    deleteButton: HTMLButtonElement,
+  ) {
     const group = groups.find((candidate) => candidate.id === groupId);
     if (!group) return;
     const tab = group.tabs.find((candidate) => candidate.id === tabId);
     if (!tab) return;
+    const tabList = deleteButton.closest('.tab-list');
+    const deleteButtons = tabList
+      ? Array.from(
+          tabList.querySelectorAll<HTMLButtonElement>('.tab-action--delete:not(:disabled)'),
+        )
+      : [];
+    const deleteButtonIndex = deleteButtons.indexOf(deleteButton);
+    const nextFocusTarget = deleteButtonIndex >= 0
+      ? deleteButtons[deleteButtonIndex + 1] ?? deleteButtons[deleteButtonIndex - 1]
+      : undefined;
 
     try {
       await runCommand({
@@ -971,7 +985,11 @@ export default function BokPage() {
         tabId,
       });
       setActionNotice({ type: 'success', message: `已删除“${tab.title}”` });
-      focusMenuTrigger(group.id);
+      if (nextFocusTarget?.isConnected && !nextFocusTarget.disabled) {
+        nextFocusTarget.focus({ preventScroll: true });
+      } else {
+        document.getElementById('saved-groups')?.focus({ preventScroll: true });
+      }
     } catch (error) {
       showCommandError('删除标签', error);
     }
@@ -1866,10 +1884,10 @@ export default function BokPage() {
             }
             disabled={location.locked}
             title={location.locked ? `${lockOwner}已锁定，先解锁后才能删除标签` : '删除'}
-            onClick={() =>
+            onClick={(event) =>
               location.directItem
                 ? void deleteDirectTab(location.directItem)
-                : void deleteTab(location.groupId, tab.id)
+                : void deleteTab(location.groupId, tab.id, event.currentTarget)
             }
           >
             <svg viewBox="0 0 20 20" aria-hidden="true">
