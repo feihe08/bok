@@ -223,11 +223,19 @@ fakeBrowser.bookmarks.getSubTree = async () => [
 ];
 
 const settings = await import('../libs/saved-pages/settings.ts');
+const aiSettings = await import('../libs/bookmarks/organization-ai-settings.ts');
 const backup = await import('../libs/backup/backup.ts');
 
 await fakeBrowser.storage.local.set({
   [settings.SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY]: 3,
   [settings.THEME_PREFERENCE_KEY]: 'dark',
+  [aiSettings.BOOKMARK_ORGANIZATION_AI_SETTINGS_KEY]: {
+    schemaVersion: 1,
+    endpoint: 'https://api.example.com/v1/responses',
+    apiKey: 'backup-key',
+    model: 'backup-model',
+    preference: '保留技术文档。',
+  },
   sessions: { schemaVersion: 1, revision: 4, sessions: [] },
 });
 
@@ -263,8 +271,23 @@ assert.deepEqual(readingListBackup, {
   items: [],
 });
 const settingsBackup = JSON.parse(await readText(root, 'devices/personal/bok-settings.json'));
-assert.deepEqual(settingsBackup.settings, { savedPagesAutoArchivePeriod: 3, theme: 'dark' });
-assert.deepEqual(Object.keys(settingsBackup.settings).sort(), ['savedPagesAutoArchivePeriod', 'theme']);
+assert.equal(settingsBackup.schemaVersion, 2);
+assert.deepEqual(settingsBackup.settings, {
+  savedPagesAutoArchivePeriod: 3,
+  theme: 'dark',
+  bookmarkOrganizationAi: {
+    schemaVersion: 1,
+    endpoint: 'https://api.example.com/v1/responses',
+    apiKey: 'backup-key',
+    model: 'backup-model',
+    preference: '保留技术文档。',
+  },
+});
+assert.deepEqual(Object.keys(settingsBackup.settings).sort(), [
+  'bookmarkOrganizationAi',
+  'savedPagesAutoArchivePeriod',
+  'theme',
+]);
 assert.equal(JSON.stringify(settingsBackup).includes('claimId'), false);
 assert.equal(JSON.stringify(settingsBackup).includes('deviceName'), false);
 assert.equal(JSON.stringify(settingsBackup).includes('bookmarkBackupState'), false);

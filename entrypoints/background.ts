@@ -12,6 +12,15 @@ import {
   isDefaultFolderMarker,
   markDefaultBookmarkFolderAsMostRecentlyModified,
 } from '../libs/bookmarks/default-folder';
+import { BookmarkOrganizer } from '../libs/bookmarks/organizer';
+import {
+  isBookmarkOrganizerAiCommand,
+  isBookmarkOrganizerCommand,
+  isBookmarkOrganizerCommandMessage,
+  type BookmarkOrganizerResponse,
+} from '../libs/bookmarks/organizer-messages';
+import { createBookmarkOrganizerOperations } from '../libs/bookmarks/organizer-operations';
+import { handleBookmarkOrganizationAiMessage } from '../libs/bookmarks/organization-ai-messages';
 import {
   connectCodexBookmarkBridge,
   disconnectCodexBookmarkBridge,
@@ -170,6 +179,11 @@ const readingListFeedbackTokens = new Map<number, object>();
 const pendingTaskGroupAdoptionIds = new Set<number>();
 const pendingTaskGroupIds = new Set<number>();
 const pendingTaskTabIds = new Set<number>();
+const bookmarkOrganizer = new BookmarkOrganizer();
+const bookmarkOrganizerOperations = createBookmarkOrganizerOperations({
+  organizer: bookmarkOrganizer,
+});
+let bookmarkOrganizerReady: Promise<void> | null = null;
 
 function enqueueOperation<T>(operation: () => Promise<T>): Promise<T> {
   const task = operationQueue.then(operation);
@@ -306,6 +320,120 @@ export async function recoverDefaultBookmarkFolderMarkers(): Promise<boolean> {
   return removedMarkers === 0
     ? true
     : markDefaultBookmarkFolderAsMostRecentlyModified();
+}
+
+function setBookmarkOrganizerReady(operation: () => Promise<void>): Promise<void> {
+  const ready = operation();
+  bookmarkOrganizerReady = ready;
+  void ready.then(
+    () => {
+      if (bookmarkOrganizerReady === ready) bookmarkOrganizerReady = null;
+    },
+    () => {
+      if (bookmarkOrganizerReady === ready) bookmarkOrganizerReady = null;
+    },
+  );
+  return ready;
+}
+
+function enqueueBookmarkOrganizer(operation: () => Promise<unknown>): void {
+  const ready = bookmarkOrganizerReady;
+  void enqueueOperation(async () => {
+    if (ready) await ready;
+    return operation();
+  }).catch((error) => {
+    console.error('[bok] failed to track bookmark organizer change', error);
+  });
+}
+
+function handleOrganizerBookmarkCreated(id: string): void {
+  enqueueBookmarkOrganizer(() => bookmarkOrganizer.trackCreated(id));
+}
+
+function handleOrganizerBookmarkChanged(
+  id: string,
+  changes: { title?: string; url?: string },
+): void {
+  if (changes.title === undefined && changes.url === undefined) return;
+  enqueueBookmarkOrganizer(() => bookmarkOrganizer.trackChanged(id, changes));
+}
+
+function handleOrganizerBookmarkMoved(
+  id: string,
+  move: { parentId: string; oldParentId: string },
+): void {
+  if (move.parentId === move.oldParentId) return;
+  if (bookmarkOrganizerOperations.suppressor.consumeMove(id, move.parentId)) return;
+  enqueueBookmarkOrganizer(() => bookmarkOrganizer.trackMoved(id, move));
+}
+
+function handleOrganizerBookmarkRemoved(id: string): void {
+  if (bookmarkOrganizerOperations.suppressor.consumeRemove(id)) return;
+  enqueueBookmarkOrganizer(() => bookmarkOrganizer.trackRemoved(id));
+}
+
+export function registerBookmarkOrganizerListeners(): boolean {
+  const bookmarksApi = browser.bookmarks;
+  if (
+    !bookmarksApi?.onCreated ||
+    !bookmarksApi.onChanged ||
+    !bookmarksApi.onMoved ||
+    !bookmarksApi.onRemoved
+  ) {
+    return false;
+  }
+  try {
+    bookmarksApi.onCreated.removeListener(handleOrganizerBookmarkCreated);
+    bookmarksApi.onChanged.removeListener(handleOrganizerBookmarkChanged);
+    bookmarksApi.onMoved.removeListener(handleOrganizerBookmarkMoved);
+    bookmarksApi.onRemoved.removeListener(handleOrganizerBookmarkRemoved);
+    bookmarksApi.onCreated.addListener(handleOrganizerBookmarkCreated);
+    bookmarksApi.onChanged.addListener(handleOrganizerBookmarkChanged);
+    bookmarksApi.onMoved.addListener(handleOrganizerBookmarkMoved);
+    bookmarksApi.onRemoved.addListener(handleOrganizerBookmarkRemoved);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function unregisterBookmarkOrganizerListeners(): void {
+  const bookmarksApi = browser.bookmarks;
+  if (!bookmarksApi?.onCreated) return;
+  try {
+    bookmarksApi.onCreated.removeListener(handleOrganizerBookmarkCreated);
+    bookmarksApi.onChanged?.removeListener(handleOrganizerBookmarkChanged);
+    bookmarksApi.onMoved?.removeListener(handleOrganizerBookmarkMoved);
+    bookmarksApi.onRemoved?.removeListener(handleOrganizerBookmarkRemoved);
+  } catch {
+    // Optional Bookmarks API may disappear immediately after permission removal.
+  }
+}
+
+export async function initializeBookmarkOrganizerTracking(): Promise<boolean> {
+  const listenersRegistered = registerBookmarkOrganizerListeners();
+  let initialized = false;
+  await setBookmarkOrganizerReady(async () => {
+    const canReadBookmarks = await browser.permissions.contains({
+      permissions: ['bookmarks'],
+    });
+    if (!canReadBookmarks || !browser.bookmarks) {
+      unregisterBookmarkOrganizerListeners();
+      return;
+    }
+    if (!listenersRegistered && !registerBookmarkOrganizerListeners()) return;
+    await bookmarkOrganizer.initialize();
+    initialized = true;
+  });
+  return initialized;
+}
+
+export async function recoverBookmarkOrganizerTracking(): Promise<boolean> {
+  if (!registerBookmarkOrganizerListeners()) return false;
+  await setBookmarkOrganizerReady(async () => {
+    await bookmarkOrganizer.recoverAfterPermissionGap();
+  });
+  return true;
 }
 
 async function ensureAutoArchiveAlarm(): Promise<void> {
@@ -546,6 +674,9 @@ export default defineBackground(() => {
   void recoverDefaultBookmarkFolderMarkers().catch((error) => {
     console.error('[bok] failed to recover bookmark default folder markers', error);
   });
+  void initializeBookmarkOrganizerTracking().catch((error) => {
+    console.error('[bok] failed to initialize bookmark organizer tracking', error);
+  });
 
   browser.runtime.onInstalled.addListener(() => {
     void queueContextMenuRefresh().catch((error) => {
@@ -646,6 +777,9 @@ export default defineBackground(() => {
       void recoverDefaultBookmarkFolderMarkers().catch((error) => {
         console.error('[bok] failed to recover bookmark default folder markers', error);
       });
+      void recoverBookmarkOrganizerTracking().catch((error) => {
+        console.error('[bok] failed to recover bookmark organizer tracking', error);
+      });
     }
     if (
       permissions.permissions?.includes('bookmarks') ||
@@ -660,6 +794,10 @@ export default defineBackground(() => {
   browser.permissions.onRemoved.addListener((permissions) => {
     if (permissions.permissions?.includes('bookmarks')) {
       unregisterBookmarkDefaultFolderListeners();
+      unregisterBookmarkOrganizerListeners();
+      void enqueueOperation(() => bookmarkOrganizer.markPermissionGap()).catch((error) => {
+        console.error('[bok] failed to mark bookmark organizer permission gap', error);
+      });
     }
     if (
       permissions.permissions?.includes('bookmarks') ||
@@ -797,6 +935,34 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (handleBookmarkOrganizationAiMessage(message, sendResponse)) return true;
+
+    if (isBookmarkOrganizerCommand(message)) {
+      const execute = async () => {
+        const ready = bookmarkOrganizerReady;
+        if (ready) await ready;
+        return bookmarkOrganizerOperations.execute(message);
+      };
+      const operation = isBookmarkOrganizerAiCommand(message)
+        ? execute()
+        : enqueueOperation(execute);
+      void operation.then(
+        (result) => sendResponse({ ok: true, result } satisfies BookmarkOrganizerResponse),
+        (error) => sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        } satisfies BookmarkOrganizerResponse),
+      );
+      return true;
+    }
+    if (isBookmarkOrganizerCommandMessage(message)) {
+      sendResponse({
+        ok: false,
+        error: '书签整理命令无效',
+      } satisfies BookmarkOrganizerResponse);
+      return false;
+    }
+
     if (isBookmarkBackupCommand(message)) {
       void runBookmarkBackup(message.force).then(
         (result) => {

@@ -45,6 +45,16 @@ function toSnapshot(node: BookmarkNode): BookmarkSnapshot {
   };
 }
 
+function containsBookmarkNode(
+  nodes: readonly BookmarkNode[],
+  nodeId: string,
+): boolean {
+  return nodes.some(
+    (node) =>
+      node.id === nodeId || containsBookmarkNode(node.children ?? [], nodeId),
+  );
+}
+
 async function createSnapshot(
   snapshot: BookmarkSnapshot,
   parentId: string,
@@ -92,7 +102,7 @@ export async function readBookmarksBar(): Promise<BookmarkNode> {
 export async function moveBookmarkNode(
   node: BookmarkNode,
   destination: { parentId: string; index?: number },
-): Promise<void> {
+): Promise<boolean> {
   const [current] = (await browser.bookmarks.get(node.id)) as BookmarkNode[];
   if (
     !current ||
@@ -112,11 +122,18 @@ export async function moveBookmarkNode(
   };
   await browser.storage.session.set({ [BOOKMARK_UNDO_KEY]: undo });
 
+  let moved: BookmarkNode;
   try {
-    const moved = (await browser.bookmarks.move(
+    moved = (await browser.bookmarks.move(
       node.id,
       destination,
     )) as BookmarkNode;
+  } catch (error) {
+    await browser.storage.session.remove(BOOKMARK_UNDO_KEY).catch(() => undefined);
+    throw error;
+  }
+
+  try {
     await browser.storage.session.set({
       [BOOKMARK_UNDO_KEY]: {
         ...undo,
@@ -124,13 +141,14 @@ export async function moveBookmarkNode(
         ...(moved.index == null ? {} : { currentIndex: moved.index }),
       } satisfies BookmarkMoveUndo,
     });
-  } catch (error) {
-    await browser.storage.session.remove(BOOKMARK_UNDO_KEY);
-    throw error;
+    return true;
+  } catch {
+    await browser.storage.session.remove(BOOKMARK_UNDO_KEY).catch(() => undefined);
+    return false;
   }
 }
 
-export async function deleteBookmarkNode(node: BookmarkNode): Promise<void> {
+export async function deleteBookmarkNode(node: BookmarkNode): Promise<boolean> {
   const [current] = (await browser.bookmarks.getSubTree(
     node.id,
   )) as BookmarkNode[];
@@ -160,9 +178,24 @@ export async function deleteBookmarkNode(node: BookmarkNode): Promise<void> {
       await browser.bookmarks.remove(current.id);
     }
   } catch (error) {
-    await browser.storage.session.remove(BOOKMARK_UNDO_KEY);
+    await browser.storage.session.remove(BOOKMARK_UNDO_KEY).catch(() => undefined);
     throw error;
   }
+
+  let stillExists: boolean;
+  try {
+    const tree = (await browser.bookmarks.getTree()) as BookmarkNode[];
+    stillExists = containsBookmarkNode(tree, current.id);
+  } catch {
+    // Chrome confirmed the removal. A transient verification read must not
+    // turn the completed deletion into a failed, non-undoable organizer action.
+    return true;
+  }
+  if (stillExists) {
+    await browser.storage.session.remove(BOOKMARK_UNDO_KEY).catch(() => undefined);
+    throw new Error('Chrome 未删除该书签，请重试');
+  }
+  return true;
 }
 
 export async function restoreLastBookmarkOperation(): Promise<BookmarkUndoResult | null> {

@@ -8,6 +8,9 @@
 - Chrome 书签栏、Bok 书签归档、共享的好文列表、按电脑区分的 Saved pages 和当前设置
   已支持写入本机或 iCloud Drive；Saved pages、好文和书签归档 JSON 已支持合并导入，
   完整预览以及设置、Chrome 书签和每周 ZIP 恢复仍需后续实现。
+- 实现按机器恢复 `bok-settings.json`；当前设置备份已包含该机器独立的 Responses API
+  Endpoint、API Key、Model 和整理偏好，恢复仍需用户明确确认，且不得恢复整理基线、变化队列
+  或缓存建议。
 - 共享文件只依赖本机或 iCloud Drive 的文件传播；Bok 尚不提供好文列表或归档库的实时
   跨设备同步、自动合并或离线并发冲突解决。
 - 已有 `check:session-import`、`check:session-operations` 与 `check:bookmark-backup`
@@ -28,8 +31,8 @@
 
 ## 书签与导入能力
 
-- 规划 Chrome 书签整理能力，包括重复识别与死链检查；当前仅保留未启用的入口，
-  不申请 HTTP/HTTPS host 权限，也不会自动分析、删除或合并书签。
+- 评估 Chrome 书签的重复识别与死链检查；当前增量整理只审核新增或变化书签的目录与长期
+  保存价值，不自动分析重复项或死链，也不自动删除或合并书签。
 - 评估旧的 `SavedTab.tags`、`SavedTab.directory` 字段是否继续用于“标签页晋升为书签”；
   当前 Chrome 书签管理不读取或写入这些字段。
 - 评估并实现 OneTab 文本导入。该能力不在当前 `requirement.md` 的既定范围内。

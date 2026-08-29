@@ -51,6 +51,7 @@ export default defineConfig({
       'contextMenus',
     ],
     optional_permissions: ['bookmarks', 'nativeMessaging'],
+    optional_host_permissions: ['https://*/*'],
     action: {
       default_icon: {
         16: 'icon/16.png',

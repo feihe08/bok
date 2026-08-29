@@ -37,6 +37,15 @@ import {
   setDefaultBookmarkFolderId,
   type DefaultBookmarkFolderSettings,
 } from '../../libs/bookmarks/default-folder';
+import {
+  BOOKMARK_ORGANIZATION_AI_SETTINGS_KEY,
+  BOOKMARK_ORGANIZATION_AI_TEST_COMMAND,
+  createBookmarkOrganizationAiSettings,
+  getBookmarkOrganizationAiSettings,
+  saveBookmarkOrganizationAiSettings,
+  type BookmarkOrganizationAiSettings,
+  type BookmarkOrganizationAiTestResponse,
+} from '../../libs/bookmarks/organization-ai-settings';
 import { useBokTheme } from '../shared/useBokTheme';
 
 type DirectoryPermission = 'granted' | 'denied' | 'prompt' | 'missing';
@@ -44,6 +53,7 @@ type Notice = { type: 'success' | 'error'; message: string };
 type SettingsSection =
   | 'machine'
   | 'bookmarks'
+  | 'bookmark-ai'
   | 'saved-pages'
   | 'backup'
   | 'import';
@@ -55,6 +65,7 @@ function getSettingsSection(): SettingsSection {
   if (window.location.hash === '#import-settings') return 'import';
   if (window.location.hash === '#backup-settings') return 'backup';
   if (window.location.hash === '#saved-pages-settings') return 'saved-pages';
+  if (window.location.hash === '#bookmark-ai-settings') return 'bookmark-ai';
   if (window.location.hash === '#bookmark-settings') return 'bookmarks';
   return 'machine';
 }
@@ -151,6 +162,15 @@ export default function SettingsPage() {
     useState<SavedPagesAutoArchivePeriod>(7);
   const [bookmarkFolderSettings, setBookmarkFolderSettings] =
     useState<DefaultBookmarkFolderSettings>(EMPTY_BOOKMARK_FOLDER_SETTINGS);
+  const [bookmarkOrganizationAiSettings, setBookmarkOrganizationAiSettings] =
+    useState<BookmarkOrganizationAiSettings | null>(null);
+  const [bookmarkOrganizationAiSettingsLoaded, setBookmarkOrganizationAiSettingsLoaded] =
+    useState(false);
+  const [aiEndpoint, setAiEndpoint] = useState('');
+  const [aiApiKey, setAiApiKey] = useState('');
+  const [aiModel, setAiModel] = useState('');
+  const [aiPreference, setAiPreference] = useState('');
+  const [aiSettingsError, setAiSettingsError] = useState('');
   const [activeSection, setActiveSection] =
     useState<SettingsSection>(getSettingsSection);
   const [backupDeviceName, setBackupDeviceName] = useState('personal');
@@ -168,6 +188,7 @@ export default function SettingsPage() {
       canReadBookmarks,
       canUseCodexBookmarkBridge,
       nextAutoArchivePeriod,
+      nextBookmarkOrganizationAiSettings,
     ] =
       await Promise.all([
         getBookmarkBackupState(),
@@ -175,6 +196,7 @@ export default function SettingsPage() {
         browser.permissions.contains({ permissions: ['bookmarks'] }),
         browser.permissions.contains({ permissions: ['nativeMessaging'] }),
         getSavedPagesAutoArchivePeriod(),
+        getBookmarkOrganizationAiSettings(),
       ]);
     const nextBookmarkFolderSettings = canReadBookmarks
       ? await getDefaultBookmarkFolderSettings()
@@ -187,6 +209,12 @@ export default function SettingsPage() {
     );
     setAutoArchivePeriod(nextAutoArchivePeriod);
     setBookmarkFolderSettings(nextBookmarkFolderSettings);
+    setBookmarkOrganizationAiSettings(nextBookmarkOrganizationAiSettings);
+    setBookmarkOrganizationAiSettingsLoaded(true);
+    setAiEndpoint(nextBookmarkOrganizationAiSettings?.endpoint ?? '');
+    setAiApiKey(nextBookmarkOrganizationAiSettings?.apiKey ?? '');
+    setAiModel(nextBookmarkOrganizationAiSettings?.model ?? '');
+    setAiPreference(nextBookmarkOrganizationAiSettings?.preference ?? '');
   }, []);
 
   useEffect(() => {
@@ -212,7 +240,8 @@ export default function SettingsPage() {
       if (
         areaName === 'local' &&
         (changes[BOOKMARK_BACKUP_STATE_KEY] ||
-          changes[SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY])
+          changes[SAVED_PAGES_AUTO_ARCHIVE_PERIOD_KEY] ||
+          changes[BOOKMARK_ORGANIZATION_AI_SETTINGS_KEY])
       ) {
         void refresh();
       }
@@ -297,6 +326,86 @@ export default function SettingsPage() {
         type: 'error',
         message: `默认书签目录保存失败：${error instanceof Error ? error.message : '请重试'}`,
       });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function saveBookmarkOrganizationAi(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || !bookmarkOrganizationAiSettingsLoaded) return;
+
+    setBusy('bookmark-ai');
+    setNotice(null);
+    setAiSettingsError('');
+    try {
+      const next = createBookmarkOrganizationAiSettings({
+        endpoint: aiEndpoint,
+        apiKey: aiApiKey,
+        model: aiModel,
+        preference: aiPreference,
+      });
+      await saveBookmarkOrganizationAiSettings(next, bookmarkOrganizationAiSettings);
+      setBookmarkOrganizationAiSettings(next);
+      setAiEndpoint(next.endpoint);
+      setAiApiKey(next.apiKey);
+      setAiModel(next.model);
+      setAiPreference(next.preference);
+      setNotice({ type: 'success', message: '书签整理 AI 配置已保存。' });
+      triggerForceBackup();
+    } catch (error) {
+      setAiSettingsError(
+        error instanceof Error ? error.message : '无法保存书签整理 AI 配置',
+      );
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function clearBookmarkOrganizationAi() {
+    if (busy || !bookmarkOrganizationAiSettingsLoaded) return;
+
+    setBusy('bookmark-ai');
+    setNotice(null);
+    setAiSettingsError('');
+    try {
+      await saveBookmarkOrganizationAiSettings(null, bookmarkOrganizationAiSettings);
+      setBookmarkOrganizationAiSettings(null);
+      setAiEndpoint('');
+      setAiApiKey('');
+      setAiModel('');
+      setAiPreference('');
+      setNotice({ type: 'success', message: '书签整理 AI 配置已清除。' });
+      triggerForceBackup();
+    } catch (error) {
+      setAiSettingsError(
+        error instanceof Error ? error.message : '无法清除书签整理 AI 配置',
+      );
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function testBookmarkOrganizationAiConnection() {
+    if (busy || !bookmarkOrganizationAiSettings) return;
+
+    setBusy('bookmark-ai-test');
+    setNotice(null);
+    setAiSettingsError('');
+    try {
+      const response = (await browser.runtime.sendMessage(
+        BOOKMARK_ORGANIZATION_AI_TEST_COMMAND,
+      )) as BookmarkOrganizationAiTestResponse | undefined;
+      if (!response) throw new Error('扩展后台未响应，请重新加载 Bok 后重试');
+      if (!response.ok) throw new Error(response.error || '连接测试失败');
+      setNotice({
+        type: 'success',
+        message: 'Responses API 连接测试成功。',
+      });
+    } catch (error) {
+      setAiSettingsError(
+        `连接测试失败：${error instanceof Error ? error.message : '请检查配置后重试'}`,
+      );
     } finally {
       setBusy('');
     }
@@ -608,6 +717,14 @@ export default function SettingsPage() {
     }
   }
 
+  const hasUnsavedBookmarkOrganizationAiChanges =
+    bookmarkOrganizationAiSettings === null
+      ? Boolean(aiEndpoint || aiApiKey || aiModel || aiPreference)
+      : aiEndpoint !== bookmarkOrganizationAiSettings.endpoint ||
+        aiApiKey !== bookmarkOrganizationAiSettings.apiKey ||
+        aiModel !== bookmarkOrganizationAiSettings.model ||
+        aiPreference !== bookmarkOrganizationAiSettings.preference;
+
   return (
     <div className="settings-page">
       <a className="skip-link" href="#settings-content">
@@ -649,6 +766,12 @@ export default function SettingsPage() {
               aria-current={activeSection === 'bookmarks' ? 'location' : undefined}
             >
               书签
+            </a>
+            <a
+              href="#bookmark-ai-settings"
+              aria-current={activeSection === 'bookmark-ai' ? 'location' : undefined}
+            >
+              书签整理 AI
             </a>
             <a
               href="#saved-pages-settings"
@@ -893,6 +1016,166 @@ export default function SettingsPage() {
                 </dd>
               </div>
             </dl>
+          </section>
+
+          <section
+            id="bookmark-ai-settings"
+            className="settings-section"
+            aria-labelledby="bookmark-ai-heading"
+          >
+            <div className="settings-section__heading">
+              <h2 id="bookmark-ai-heading">书签整理 AI</h2>
+              <p>只支持标准 OpenAI Responses API；Bok 会按你填写的完整 URL 发起请求。</p>
+            </div>
+            <form
+              className="settings-ai-form"
+              noValidate
+              onSubmit={(event) => void saveBookmarkOrganizationAi(event)}
+            >
+              <dl className="settings-list">
+                <div className="settings-row">
+                  <dt>
+                    <label htmlFor="bookmark-ai-endpoint">Responses API URL</label>
+                  </dt>
+                  <dd>
+                    <div className="settings-select-control">
+                      <input
+                        id="bookmark-ai-endpoint"
+                        className="settings-input settings-input--wide"
+                        type="url"
+                        inputMode="url"
+                        autoComplete="url"
+                        spellCheck={false}
+                        value={aiEndpoint}
+                        disabled={Boolean(busy) || !bookmarkOrganizationAiSettingsLoaded}
+                        aria-invalid={aiSettingsError ? true : undefined}
+                        aria-describedby="bookmark-ai-endpoint-help"
+                        onChange={(event) => {
+                          setAiEndpoint(event.currentTarget.value);
+                          setAiSettingsError('');
+                        }}
+                      />
+                      <p id="bookmark-ai-endpoint-help">
+                        填写完整 HTTPS URL，例如服务提供的 `/responses` 地址；Bok 不会追加路径。
+                      </p>
+                    </div>
+                  </dd>
+                </div>
+                <div className="settings-row">
+                  <dt>
+                    <label htmlFor="bookmark-ai-key">API Key</label>
+                  </dt>
+                  <dd>
+                    <div className="settings-select-control">
+                      <input
+                        id="bookmark-ai-key"
+                        className="settings-input settings-input--wide"
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={aiApiKey}
+                        disabled={Boolean(busy) || !bookmarkOrganizationAiSettingsLoaded}
+                        aria-invalid={aiSettingsError ? true : undefined}
+                        aria-describedby="bookmark-ai-key-help"
+                        onChange={(event) => {
+                          setAiApiKey(event.currentTarget.value);
+                          setAiSettingsError('');
+                        }}
+                      />
+                      <p id="bookmark-ai-key-help">
+                        以未加密明文保存在当前 Chrome 资料，并进入本机设置备份和每周设备 ZIP。
+                      </p>
+                    </div>
+                  </dd>
+                </div>
+                <div className="settings-row">
+                  <dt>
+                    <label htmlFor="bookmark-ai-model">模型</label>
+                  </dt>
+                  <dd>
+                    <div className="settings-select-control">
+                      <input
+                        id="bookmark-ai-model"
+                        className="settings-input settings-input--wide"
+                        type="text"
+                        autoComplete="off"
+                        spellCheck={false}
+                        value={aiModel}
+                        disabled={Boolean(busy) || !bookmarkOrganizationAiSettingsLoaded}
+                        aria-invalid={aiSettingsError ? true : undefined}
+                        onChange={(event) => {
+                          setAiModel(event.currentTarget.value);
+                          setAiSettingsError('');
+                        }}
+                      />
+                    </div>
+                  </dd>
+                </div>
+                <div className="settings-row">
+                  <dt>
+                    <label htmlFor="bookmark-ai-preference">整理偏好</label>
+                  </dt>
+                  <dd>
+                    <div className="settings-select-control">
+                      <textarea
+                        id="bookmark-ai-preference"
+                        className="settings-textarea"
+                        value={aiPreference}
+                        disabled={Boolean(busy) || !bookmarkOrganizationAiSettingsLoaded}
+                        aria-invalid={aiSettingsError ? true : undefined}
+                        aria-describedby="bookmark-ai-preference-help"
+                        onChange={(event) => {
+                          setAiPreference(event.currentTarget.value);
+                          setAiSettingsError('');
+                        }}
+                      />
+                      <p id="bookmark-ai-preference-help">
+                        必填。仅用于表达你希望 AI 采用的整理取向；不保存整理基线、变化队列或缓存建议。
+                      </p>
+                    </div>
+                  </dd>
+                </div>
+              </dl>
+              {aiSettingsError && (
+                <p className="settings-field-error" role="alert">
+                  {aiSettingsError}
+                </p>
+              )}
+              <div className="settings-ai-actions">
+                <button
+                  type="submit"
+                  className="secondary-button"
+                  disabled={Boolean(busy) || !bookmarkOrganizationAiSettingsLoaded}
+                >
+                  {busy === 'bookmark-ai' ? '保存中…' : '保存配置'}
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={
+                    Boolean(busy) ||
+                    !bookmarkOrganizationAiSettings ||
+                    hasUnsavedBookmarkOrganizationAiChanges
+                  }
+                  onClick={() => void testBookmarkOrganizationAiConnection()}
+                >
+                  {busy === 'bookmark-ai-test' ? '测试中…' : '测试连接'}
+                </button>
+                {bookmarkOrganizationAiSettings && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={Boolean(busy)}
+                    onClick={() => void clearBookmarkOrganizationAi()}
+                  >
+                    清除配置
+                  </button>
+                )}
+              </div>
+              <p className="settings-ai-test-note">
+                测试连接只使用已保存配置，并会向你填写的 Responses API URL 发送一次请求。
+              </p>
+            </form>
           </section>
 
           <section

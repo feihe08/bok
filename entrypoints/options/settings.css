@@ -495,6 +495,8 @@ button { color: inherit; }
   line-height: 1.4;
 }
 
+.settings-input--wide { width: min(100%, 420px); }
+
 .settings-input:hover:not(:disabled) { border-color: var(--accent); }
 
 .settings-input:focus-visible {
@@ -505,6 +507,49 @@ button { color: inherit; }
 .settings-input[aria-invalid="true"] { border-color: var(--danger); }
 
 .settings-input:disabled { opacity: 0.55; }
+
+.settings-textarea {
+  width: min(100%, 520px);
+  min-height: 96px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.settings-textarea:hover:not(:disabled) { border-color: var(--accent); }
+
+.settings-textarea:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.settings-textarea[aria-invalid="true"] { border-color: var(--danger); }
+
+.settings-textarea:disabled { opacity: 0.55; }
+
+.settings-ai-form { display: flex; flex-direction: column; gap: 14px; }
+
+.settings-ai-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.settings-ai-test-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.78125rem;
+  line-height: 1.5;
+}
+
+.settings-ai-form > .settings-field-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.78125rem;
+  line-height: 1.5;
+}
 
 .settings-device-name-form p {
   margin: 0;
@@ -698,6 +743,8 @@ button { color: inherit; }
   }
 
   .settings-input,
+  .settings-input--wide,
+  .settings-textarea,
   .settings-device-name-value,
   .settings-device-name-controls .secondary-button {
     width: 100%;

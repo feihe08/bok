@@ -23,6 +23,21 @@ import {
   type LegacyArchiveMigrationInfo,
 } from '../../libs/bookmarks/archive';
 import { emptyBookmarkArchiveStore } from '../../libs/bookmarks/archive-storage';
+import {
+  BOOKMARK_ORGANIZATION_AI_SETTINGS_KEY,
+  getBookmarkOrganizationAiSettings,
+} from '../../libs/bookmarks/organization-ai-settings';
+import type {
+  BookmarkOrganizerCommand,
+  BookmarkOrganizerResponse,
+} from '../../libs/bookmarks/organizer-messages';
+import {
+  BOOKMARK_ORGANIZER_STATE_KEY,
+  parseBookmarkOrganizerStore,
+  readBookmarkOrganizerStore,
+  type BookmarkOrganizerCandidate,
+  type BookmarkOrganizerStore,
+} from '../../libs/bookmarks/organizer-storage';
 import type {
   BookmarkArchiveRecord,
   BookmarkArchiveStore,
@@ -32,6 +47,7 @@ import { ActionMenu, type ActionMenuEntry } from '../shared/ActionMenu';
 import { AppHeader } from '../shared/AppHeader';
 import { useBokTheme } from '../shared/useBokTheme';
 import { ArchiveView } from './ArchiveView';
+import { OrganizerView, type OrganizerFolderOption } from './OrganizerView';
 
 type Notice = {
   type: 'success' | 'error';
@@ -43,7 +59,7 @@ type MoveDialogState = {
   targetId: string;
 };
 type RestoreDialogState = { archiveId: string; targetId: string };
-type BookmarkView = 'current' | 'archived';
+type BookmarkView = 'current' | 'archived' | 'organize';
 
 interface FolderEntry {
   node: BookmarkNode;
@@ -56,6 +72,11 @@ interface BookmarkIndex {
   searchTextById: Map<string, string>;
   folders: FolderEntry[];
 }
+
+type OrganizerCommandResult = {
+  store: BookmarkOrganizerStore;
+  canUndo: boolean;
+};
 
 type BookmarkEventsApi = typeof browser.bookmarks & {
   onChildrenReordered?: {
@@ -252,10 +273,71 @@ function findFolderByPath(root: BookmarkNode, path: string[]): BookmarkNode | nu
 function isNodeManaged(node: BookmarkNode, index: BookmarkIndex): boolean {
   let current: BookmarkNode | undefined = node;
   while (current) {
-    if (current.unmodifiable) return true;
+    if (current.folderType === 'managed' || current.unmodifiable) return true;
     current = current.parentId ? index.nodeById.get(current.parentId) : undefined;
   }
   return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPendingOrganizerCandidate(
+  store: BookmarkOrganizerStore,
+  candidate: BookmarkOrganizerCandidate,
+): boolean {
+  const round = store.round;
+  if (!round || round.deferredBookmarkIds.includes(candidate.bookmarkId)) return false;
+  return store.decisions[candidate.bookmarkId]?.candidateRevision !== candidate.revision;
+}
+
+function nextPendingOrganizerCandidate(
+  store: BookmarkOrganizerStore,
+  afterBookmarkId?: string,
+): BookmarkOrganizerCandidate | null {
+  const round = store.round;
+  if (!round) return null;
+  const afterIndex = afterBookmarkId
+    ? round.candidateIds.indexOf(afterBookmarkId)
+    : -1;
+  const candidateIds = afterIndex >= 0
+    ? [...round.candidateIds.slice(afterIndex + 1), ...round.candidateIds.slice(0, afterIndex + 1)]
+    : round.candidateIds;
+  return candidateIds
+    .map((bookmarkId) => store.candidates[bookmarkId])
+    .find((candidate): candidate is BookmarkOrganizerCandidate =>
+      Boolean(candidate) && isPendingOrganizerCandidate(store, candidate)) ?? null;
+}
+
+function parseOrganizerCommandResult(response: unknown): OrganizerCommandResult {
+  if (!isRecord(response) || typeof response.ok !== 'boolean') {
+    throw new Error('书签整理服务返回无效结果');
+  }
+  const typedResponse = response as BookmarkOrganizerResponse;
+  if (!typedResponse.ok) {
+    if (Object.keys(typedResponse).length !== 2 || !Object.hasOwn(typedResponse, 'error')) {
+      throw new Error('书签整理服务返回无效结果');
+    }
+    throw new Error(typeof typedResponse.error === 'string' ? typedResponse.error : '书签整理操作失败');
+  }
+  if (Object.keys(typedResponse).length !== 2 || !Object.hasOwn(typedResponse, 'result')) {
+    throw new Error('书签整理服务返回无效结果');
+  }
+
+  if (isRecord(typedResponse.result) &&
+    Object.keys(typedResponse.result).length === 2 &&
+    Object.hasOwn(typedResponse.result, 'store') &&
+    Object.hasOwn(typedResponse.result, 'canUndo') &&
+    typeof typedResponse.result.canUndo === 'boolean') {
+    const store = parseBookmarkOrganizerStore(typedResponse.result.store);
+    if (!store) throw new Error('书签整理服务返回无效状态');
+    return { store, canUndo: typedResponse.result.canUndo };
+  }
+
+  const store = parseBookmarkOrganizerStore(typedResponse.result);
+  if (!store) throw new Error('书签整理服务返回无效状态');
+  return { store, canUndo: false };
 }
 
 function FolderIcon() {
@@ -383,6 +465,14 @@ export default function BookmarkManagerPage() {
   const [archiveDialogId, setArchiveDialogId] = useState('');
   const [draggedNodeId, setDraggedNodeId] = useState('');
   const [dropTargetId, setDropTargetId] = useState('');
+  const [organizerStore, setOrganizerStore] = useState<BookmarkOrganizerStore | null>(null);
+  const [selectedOrganizerCandidateId, setSelectedOrganizerCandidateId] = useState('');
+  const [focusOrganizerCandidateId, setFocusOrganizerCandidateId] = useState<string | null>(null);
+  const [organizerBusy, setOrganizerBusy] = useState(false);
+  const [organizerAiBusyAction, setOrganizerAiBusyAction] =
+    useState<'generate' | 'retry' | null>(null);
+  const [organizerError, setOrganizerError] = useState('');
+  const [aiConfigured, setAiConfigured] = useState(false);
   const { theme: activeTheme, toggleTheme } = useBokTheme({
     forceBackupOnWrite: true,
   });
@@ -522,6 +612,62 @@ export default function BookmarkManagerPage() {
   }, [loadBookmarks, permission]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function loadOrganizerState() {
+      try {
+        const [store, settings] = await Promise.all([
+          readBookmarkOrganizerStore(),
+          getBookmarkOrganizationAiSettings(),
+        ]);
+        if (cancelled) return;
+        setOrganizerStore(store);
+        setAiConfigured(settings !== null);
+      } catch (error) {
+        console.error('[bok] failed to read bookmark organizer state', error);
+        if (!cancelled) setOrganizerError('无法读取书签整理状态，请刷新后重试。');
+      }
+    }
+
+    function onStorageChanged(
+      changes: Record<string, { newValue?: unknown }>,
+      areaName: string,
+    ) {
+      if (areaName !== 'local') return;
+      if (Object.hasOwn(changes, BOOKMARK_ORGANIZER_STATE_KEY)) {
+        try {
+          const nextStore = parseBookmarkOrganizerStore(
+            changes[BOOKMARK_ORGANIZER_STATE_KEY]?.newValue,
+          );
+          if (!nextStore) {
+            setOrganizerError('书签整理状态无效，请刷新后重试。');
+            return;
+          }
+          setOrganizerStore(nextStore);
+        } catch (error) {
+          console.error('[bok] invalid bookmark organizer state update', error);
+          setOrganizerError('书签整理状态无效，请刷新后重试。');
+        }
+      }
+      if (Object.hasOwn(changes, BOOKMARK_ORGANIZATION_AI_SETTINGS_KEY)) {
+        void getBookmarkOrganizationAiSettings()
+          .then((settings) => setAiConfigured(settings !== null))
+          .catch((error) => {
+            console.error('[bok] failed to read bookmark organization AI settings', error);
+            setAiConfigured(false);
+          });
+      }
+    }
+
+    void loadOrganizerState();
+    browser.storage.onChanged.addListener(onStorageChanged);
+    return () => {
+      cancelled = true;
+      browser.storage.onChanged.removeListener(onStorageChanged);
+    };
+  }, []);
+
+  useEffect(() => {
     if (bookmarkView !== 'current' || query || folderPath.length === 0) return;
     const frame = requestAnimationFrame(() => {
       const columns = columnsRef.current;
@@ -535,6 +681,17 @@ export default function BookmarkManagerPage() {
     });
     return () => cancelAnimationFrame(frame);
   }, [bookmarkView, folderPath.length, query, selectedId]);
+
+  useEffect(() => {
+    if (bookmarkView !== 'organize' || !organizerStore?.round) return;
+    const selected = organizerStore.candidates[selectedOrganizerCandidateId];
+    if (selected && organizerStore.round.candidateIds.includes(selected.bookmarkId)) return;
+    const next = nextPendingOrganizerCandidate(organizerStore) ??
+      organizerStore.round.candidateIds
+        .map((bookmarkId) => organizerStore.candidates[bookmarkId])
+        .find((candidate): candidate is BookmarkOrganizerCandidate => Boolean(candidate));
+    setSelectedOrganizerCandidateId(next?.bookmarkId ?? '');
+  }, [bookmarkView, organizerStore, selectedOrganizerCandidateId]);
 
   async function requestPermission() {
     try {
@@ -560,6 +717,228 @@ export default function BookmarkManagerPage() {
     setSelectedId(nextView === 'current' ? currentRoot?.id ?? '' : '');
     setSearchValue('');
     requestAnimationFrame(() => document.getElementById('bookmark-content')?.focus());
+  }
+
+  async function sendOrganizerCommand(command: BookmarkOrganizerCommand) {
+    const response: unknown = await browser.runtime.sendMessage(command);
+    return parseOrganizerCommandResult(response);
+  }
+
+  function focusNextOrganizerCandidate(
+    nextStore: BookmarkOrganizerStore,
+    afterBookmarkId?: string,
+  ) {
+    const nextCandidate = nextPendingOrganizerCandidate(nextStore, afterBookmarkId);
+    setSelectedOrganizerCandidateId(nextCandidate?.bookmarkId ?? '');
+    setFocusOrganizerCandidateId(nextCandidate?.bookmarkId ?? null);
+    if (!nextCandidate) {
+      requestAnimationFrame(() => {
+        document.getElementById('organizer-complete-round')?.focus();
+      });
+    }
+  }
+
+  async function openOrganizer() {
+    if (organizerBusy) return;
+    setOrganizerBusy(true);
+    setOrganizerError('');
+    try {
+      const result = await sendOrganizerCommand({ type: 'bok/bookmark-organizer/start-round' });
+      setOrganizerStore(result.store);
+      setBookmarkView('organize');
+      setSearchValue('');
+      focusNextOrganizerCandidate(result.store);
+    } catch (error) {
+      console.error('[bok] failed to start bookmark organizer round', error);
+      setNotice({
+        type: 'error',
+        message: `无法开始书签整理：${error instanceof Error ? error.message : '未知错误'}`,
+      });
+    } finally {
+      setOrganizerBusy(false);
+    }
+  }
+
+  async function generateOrganizerSuggestions() {
+    const round = organizerStore?.round;
+    if (!round || organizerBusy) return;
+    setOrganizerBusy(true);
+    setOrganizerAiBusyAction('generate');
+    setOrganizerError('');
+    try {
+      const result = await sendOrganizerCommand({
+        type: 'bok/bookmark-organizer/generate-suggestions',
+        roundId: round.id,
+      });
+      setOrganizerStore(result.store);
+      setNotice({ type: 'success', message: 'AI 建议已生成。' });
+      const candidateId = selectedOrganizerCandidateId || result.store.round?.candidateIds[0];
+      if (candidateId) {
+        requestAnimationFrame(() => {
+          document.getElementById(`organizer-candidate-${candidateId}`)?.focus();
+        });
+      }
+    } catch (error) {
+      console.error('[bok] failed to generate bookmark organizer suggestions', error);
+      setOrganizerError(
+        `无法生成 AI 建议：${error instanceof Error ? error.message : '请重试'}`,
+      );
+    } finally {
+      setOrganizerAiBusyAction(null);
+      setOrganizerBusy(false);
+    }
+  }
+
+  async function retryOrganizerSuggestion(bookmarkId: string) {
+    const store = organizerStore;
+    const round = store?.round;
+    const candidate = store?.candidates[bookmarkId];
+    if (!store || !round || !candidate || organizerBusy) {
+      setOrganizerError('本轮整理已发生变化，请刷新后重试。');
+      return;
+    }
+
+    setOrganizerBusy(true);
+    setOrganizerAiBusyAction('retry');
+    setOrganizerError('');
+    try {
+      const result = await sendOrganizerCommand({
+        type: 'bok/bookmark-organizer/retry-suggestion',
+        roundId: round.id,
+        bookmarkId,
+        expectedRevision: candidate.revision,
+        expected: {
+          title: candidate.title,
+          url: candidate.url,
+          parentId: candidate.parentId,
+          folderPath: candidate.folderPath,
+        },
+      });
+      setOrganizerStore(result.store);
+      setNotice({ type: 'success', message: 'AI 建议已重新生成。' });
+    } catch (error) {
+      console.error('[bok] failed to retry bookmark organizer suggestion', error);
+      setOrganizerError(
+        `无法重新生成 AI 建议：${error instanceof Error ? error.message : '请重试'}`,
+      );
+    } finally {
+      setOrganizerAiBusyAction(null);
+      setOrganizerBusy(false);
+    }
+  }
+
+  async function performOrganizerDecision(
+    bookmarkId: string,
+    action: 'keep-current' | 'move' | 'remove' | 'defer' | 'accept-suggestion',
+    destinationId?: string,
+  ) {
+    const store = organizerStore;
+    const round = store?.round;
+    const candidate = store?.candidates[bookmarkId];
+    if (!store || !round || !candidate || organizerBusy) {
+      setOrganizerError('本轮整理已发生变化，请刷新后重试。');
+      return;
+    }
+    if (action === 'move' && !destinationId) {
+      setOrganizerError('请选择一个现有目录。');
+      return;
+    }
+
+    const command: BookmarkOrganizerCommand = action === 'move'
+      ? {
+          type: 'bok/bookmark-organizer/decide',
+          action,
+          destinationId: destinationId!,
+          roundId: round.id,
+          bookmarkId,
+          expectedRevision: candidate.revision,
+          expected: {
+            title: candidate.title,
+            url: candidate.url,
+            parentId: candidate.parentId,
+            folderPath: candidate.folderPath,
+          },
+        }
+      : {
+          type: 'bok/bookmark-organizer/decide',
+          action,
+          roundId: round.id,
+          bookmarkId,
+          expectedRevision: candidate.revision,
+          expected: {
+            title: candidate.title,
+            url: candidate.url,
+            parentId: candidate.parentId,
+            folderPath: candidate.folderPath,
+          },
+        };
+
+    const messages = {
+      'keep-current': '已保留在当前目录。',
+      move: '已移动并保留。',
+      remove: '已删除该书签，可撤销。',
+      defer: '已标记为稍后决定。',
+      'accept-suggestion': '已接受 AI 建议。',
+    } as const;
+    const acceptedSuggestionMoves = action === 'accept-suggestion' &&
+      candidate.suggestion?.retention === 'keep' &&
+      candidate.suggestion.directory != null &&
+      candidate.suggestion.directory !== candidate.folderPath
+        .map((folder) => folder.title)
+        .join(' / ');
+
+    setOrganizerBusy(true);
+    setOrganizerError('');
+    try {
+      const result = await sendOrganizerCommand(command);
+      setOrganizerStore(result.store);
+      if (
+        result.canUndo ||
+        action === 'move' ||
+        action === 'remove' ||
+        action === 'accept-suggestion'
+      ) {
+        await loadBookmarks();
+      }
+      const message = !result.canUndo && (action === 'move' || acceptedSuggestionMoves)
+        ? action === 'accept-suggestion'
+          ? '已接受 AI 建议并移动书签，但本次无法撤销。'
+          : '已移动并保留，但本次无法撤销。'
+        : !result.canUndo && action === 'remove'
+          ? '已删除该书签，但本次无法撤销。'
+          : messages[action];
+      setNotice({ type: 'success', message, canUndo: result.canUndo });
+      focusNextOrganizerCandidate(result.store, bookmarkId);
+    } catch (error) {
+      console.error('[bok] failed bookmark organizer decision', error);
+      setOrganizerError(`操作失败：${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  }
+
+  async function finishOrganizerRound() {
+    const round = organizerStore?.round;
+    if (!round || organizerBusy) return;
+    setOrganizerBusy(true);
+    setOrganizerError('');
+    try {
+      const result = await sendOrganizerCommand({
+        type: 'bok/bookmark-organizer/finish-round',
+        roundId: round.id,
+      });
+      setOrganizerStore(result.store);
+      setBookmarkView('current');
+      setSelectedId(currentRoot?.id ?? '');
+      setSearchValue('');
+      setNotice({ type: 'success', message: '本轮书签整理已完成。' });
+      requestAnimationFrame(() => document.getElementById('bookmark-content')?.focus());
+    } catch (error) {
+      console.error('[bok] failed to finish bookmark organizer round', error);
+      setOrganizerError(`无法完成本轮：${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setOrganizerBusy(false);
+    }
   }
 
   function canDropIntoFolder(node: BookmarkNode, folder: BookmarkNode): boolean {
@@ -641,8 +1020,12 @@ export default function BookmarkManagerPage() {
     if (busyId) return;
     setBusyId(node.id);
     try {
-      await moveBookmarkNode(node, destination);
-      setNotice({ type: 'success', message, canUndo: true });
+      const canUndo = await moveBookmarkNode(node, destination);
+      setNotice({
+        type: 'success',
+        message: canUndo ? message : `${message.replace(/。$/, '')}，但本次无法撤销。`,
+        canUndo,
+      });
       setMoveDialog(null);
       setMoveError('');
       await loadBookmarks();
@@ -753,6 +1136,22 @@ export default function BookmarkManagerPage() {
     try {
       const restored = await restoreLastBookmarkOperation();
       if (!restored) throw new Error('没有可以撤销的操作');
+      if (restored.type === 'move') {
+        try {
+          const result = await sendOrganizerCommand({
+            type: 'bok/bookmark-organizer/reconcile-move-undo',
+            bookmarkId: restored.nodeId,
+          });
+          setOrganizerStore(result.store);
+        } catch (error) {
+          await loadBookmarks();
+          setNotice({
+            type: 'error',
+            message: `已撤销移动，但整理状态未同步：${error instanceof Error ? error.message : '请刷新页面'}`,
+          });
+          return;
+        }
+      }
       await loadBookmarks();
       setNotice({
         type: 'success',
@@ -945,7 +1344,7 @@ export default function BookmarkManagerPage() {
             ? '搜索归档文件夹、标题或网址'
             : '搜索文件夹、书签名称或网址',
         value: searchValue,
-        disabled: permission !== true,
+        disabled: permission !== true || bookmarkView === 'organize',
         onChange: (event) => setSearchValue(event.target.value),
       }}
       theme={activeTheme}
@@ -979,8 +1378,8 @@ export default function BookmarkManagerPage() {
             <img src="/bok.svg" alt="" />
             <h1>允许 Bok 管理 Chrome 书签栏</h1>
             <p>
-              Bok 只读取书签栏。只有在你确认拖动或归档文件夹时才会修改内容，更改可能通过
-              Chrome 同步到其他设备。
+              Bok 只读取书签栏。只有在你确认拖动、归档文件夹，或在整理页逐项确认移动或删除时才会修改内容，
+              更改可能通过 Chrome 同步到其他设备。
             </p>
             <button type="button" onClick={() => void requestPermission()}>
               允许访问书签
@@ -1007,6 +1406,11 @@ export default function BookmarkManagerPage() {
     archiveDialogNode && archiveDialogNode.url == null
       ? getFolderCounts(archiveDialogNode)
       : null;
+  const organizerFolders: OrganizerFolderOption[] = index
+    ? index.folders
+      .filter((folder) => !isNodeManaged(folder.node, index))
+      .map((folder) => ({ id: folder.node.id, path: folder.path }))
+    : [];
 
   return (
     <div className="bookmark-page">
@@ -1024,7 +1428,7 @@ export default function BookmarkManagerPage() {
         >
           {root && (
             <div className="bookmark-view-toolbar" aria-label="书签工具">
-              {bookmarkView === 'archived' && (
+              {(bookmarkView === 'archived' || bookmarkView === 'organize') && (
                 <button
                   type="button"
                   className="bookmark-toolbar-button bookmark-toolbar-button--back"
@@ -1059,8 +1463,8 @@ export default function BookmarkManagerPage() {
                   <button
                     type="button"
                     className="bookmark-toolbar-button"
-                    title="整理功能尚未开放"
-                    disabled
+                    disabled={organizerBusy}
+                    onClick={() => void openOrganizer()}
                   >
                     整理
                   </button>
@@ -1090,6 +1494,43 @@ export default function BookmarkManagerPage() {
               }}
               onMigrateLegacy={() => void performLegacyMigration()}
             />
+          ) : bookmarkView === 'organize' && organizerStore ? (
+            <OrganizerView
+              store={organizerStore}
+              round={organizerStore.round}
+              folders={organizerFolders}
+              selectedCandidateId={selectedOrganizerCandidateId}
+              focusCandidateId={focusOrganizerCandidateId}
+              busy={organizerBusy}
+              aiBusyAction={organizerAiBusyAction}
+              error={organizerError}
+              aiConfigured={aiConfigured}
+              onSelectCandidate={(bookmarkId) => {
+                setSelectedOrganizerCandidateId(bookmarkId);
+                setFocusOrganizerCandidateId(null);
+                setOrganizerError('');
+              }}
+              onGenerateSuggestions={() => void generateOrganizerSuggestions()}
+              onCompleteRound={() => void finishOrganizerRound()}
+              onAcceptSuggestion={(bookmarkId) =>
+                void performOrganizerDecision(bookmarkId, 'accept-suggestion')}
+              onMoveAndKeep={(bookmarkId, folderId) =>
+                void performOrganizerDecision(bookmarkId, 'move', folderId)}
+              onKeepCurrent={(bookmarkId) =>
+                void performOrganizerDecision(bookmarkId, 'keep-current')}
+              onDiscard={(bookmarkId) =>
+                void performOrganizerDecision(bookmarkId, 'remove')}
+              onDefer={(bookmarkId) => void performOrganizerDecision(bookmarkId, 'defer')}
+              onRetrySuggestion={(bookmarkId) =>
+                void retryOrganizerSuggestion(bookmarkId)}
+            />
+          ) : bookmarkView === 'organize' ? (
+            <section className="organizer-empty-state" aria-labelledby="organizer-loading-heading">
+              <h1 id="organizer-loading-heading">书签整理</h1>
+              <p role={organizerError ? 'alert' : 'status'}>
+                {organizerError || '正在读取书签整理状态…'}
+              </p>
+            </section>
           ) : currentRoot && index && selectedFolder ? (
             <>
               <h1 className="sr-only">{query ? '书签搜索结果' : '书签'}</h1>

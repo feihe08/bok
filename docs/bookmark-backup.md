@@ -14,7 +14,7 @@ Saved pages 和当前设置按机器名称隔离；阅读列表、Chrome 书签�
 - 备份 `browser.storage.local.readingList` 中所有有效的长期好文收藏和纯文本备注。
 - 备份 `browser.storage.local.bookmarkArchiveStore` 中由用户明确归档的完整文件夹树。
 - 用户通过设置页选择一个本机或 iCloud Drive 文件夹，并为当前电脑设置唯一的机器名称。
-- 备份当前自动归档周期和主题设置。
+- 备份当前自动归档周期、主题，以及当前机器的书签整理 AI 配置。
 - 设置页可以导入 `bok-saved-pages.json`、`bok-reading-list.json` 和
   `bok-bookmark-archive.json`；当前不支持
   直接导入设置、Chrome 书签备份或每周 ZIP。
@@ -127,23 +127,36 @@ v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快�
 同一完整 URL 只保留一条；导入时已有收藏优先，保留其原备注。favicon 在展示时根据 URL
 获取，不写入文件。
 
-`bok-settings.json` 使用独立的严格 envelope：
+`bok-settings.json` 使用独立的严格 v2 envelope：
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "kind": "bok-settings-backup",
   "createdAt": "2026-08-15T12:00:00.000Z",
   "settings": {
     "savedPagesAutoArchivePeriod": 7,
-    "theme": "dark"
+    "theme": "dark",
+    "bookmarkOrganizationAi": {
+      "schemaVersion": 1,
+      "endpoint": "https://api.example.com/v1/responses",
+      "apiKey": "example-key",
+      "model": "example-model",
+      "preference": "优先保留技术文档。"
+    }
   }
 }
 ```
 
 `savedPagesAutoArchivePeriod` 为 `1`、`3`、`7`、`30` 或 `"never"`；`theme` 为
-`"system"`、`"light"` 或 `"dark"`。文件不包含机器名称、claim、目录句柄、Chrome
-权限、最近备份状态、导入副本或恢复副本。
+`"system"`、`"light"` 或 `"dark"`。`bookmarkOrganizationAi` 为 `null` 或当前机器的
+配置；其 endpoint 是用户填写的完整 HTTPS Responses API URL，不能含 URL 用户名、密码、
+查询参数或片段。API Key 以未加密明文保存。文件不包含机器名称、claim、目录句柄、Chrome
+权限、最近备份状态、整理基线、变化队列、缓存建议、导入副本或恢复副本。
+
+旧 v1 设置备份仍保留原有 `savedPagesAutoArchivePeriod` 和 `theme` 字段；当前设置恢复尚未
+实现，因此 Bok 不会读取或改写旧设置备份。后续恢复实现必须同时支持 v1 和 v2，并要求用户
+明确确认后才写入本机配置。
 
 `bok-bookmark-archive.json` 保存独立的归档 envelope。归档节点只包含文件夹名称、
 书签标题、完整 URL、层级和原始顺序；favicon 在展示时根据 URL 获取，不写入文件。
@@ -182,6 +195,7 @@ v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快�
 2. 如果当前名称、当天成功状态、本机/共享文件路径和两类周包状态都匹配，普通请求跳过。
 3. 检查目录句柄、写权限和当前 claim；冲突时停止，不写入本机数据。
 4. 生成本机 Saved pages、设置，以及共享好文收藏、Chrome 书签栏、书签归档五份最新 JSON。
+   已配置书签整理 AI 时，本机设置文件和本机周包会包含其明文 API Key。
 5. 每个文件写入后都重新读取完整内容进行字节级校验。
 6. 本自然周尚未成功时，分别生成本机周包和共享周包，并只清理当前名称超出最近 10 份
    的对应周包。

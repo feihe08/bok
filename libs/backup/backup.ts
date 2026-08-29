@@ -6,6 +6,7 @@ import {
   getSavedPagesAutoArchivePeriod,
   getThemePreference,
 } from '../saved-pages/settings';
+import { getBookmarkOrganizationAiSettings } from '../bookmarks/organization-ai-settings';
 import { readBookmarksBar } from '../bookmarks/api';
 import {
   exportBookmarkArchiveJson,
@@ -99,7 +100,7 @@ interface BookmarkBackupFile {
 }
 
 interface SettingsBackupFile {
-  schemaVersion: 1;
+  schemaVersion: 2;
   kind: 'bok-settings-backup';
   createdAt: string;
   settings: {
@@ -107,6 +108,9 @@ interface SettingsBackupFile {
       ReturnType<typeof getSavedPagesAutoArchivePeriod>
     >;
     theme: Awaited<ReturnType<typeof getThemePreference>>;
+    bookmarkOrganizationAi: Awaited<
+      ReturnType<typeof getBookmarkOrganizationAiSettings>
+    >;
   };
 }
 
@@ -712,15 +716,16 @@ function weeklyPattern(
 }
 
 async function createSettingsBackupContents(timestamp: number): Promise<string> {
-  const [savedPagesAutoArchivePeriod, theme] = await Promise.all([
+  const [savedPagesAutoArchivePeriod, theme, bookmarkOrganizationAi] = await Promise.all([
     getSavedPagesAutoArchivePeriod(),
     getThemePreference(),
+    getBookmarkOrganizationAiSettings(),
   ]);
   const backup: SettingsBackupFile = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'bok-settings-backup',
     createdAt: new Date(timestamp).toISOString(),
-    settings: { savedPagesAutoArchivePeriod, theme },
+    settings: { savedPagesAutoArchivePeriod, theme, bookmarkOrganizationAi },
   };
   return `${JSON.stringify(backup, null, 2)}\n`;
 }
