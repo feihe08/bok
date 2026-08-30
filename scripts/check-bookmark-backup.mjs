@@ -202,8 +202,8 @@ globalThis.chrome = fakeBrowser;
 installIndexedDbMock();
 
 const root = new MemoryDirectory('backup-root');
-const legacySavedPages = '{"schemaVersion":1,"revision":1,"sessions":[]}\n';
-root.files.set('bok-saved-pages.json', new MemoryFile(legacySavedPages));
+const preexistingRootSavedPages = 'preexisting root backup\n';
+root.files.set('bok-saved-pages.json', new MemoryFile(preexistingRootSavedPages));
 globalThis.window = {
   showDirectoryPicker: async () => root,
 };
@@ -236,7 +236,7 @@ await fakeBrowser.storage.local.set({
     model: 'backup-model',
     preference: '保留技术文档。',
   },
-  sessions: { schemaVersion: 1, revision: 4, sessions: [] },
+  sessions: { schemaVersion: 3, revision: 4, sessions: [] },
 });
 
 await backup.chooseBookmarkBackupDirectory();
@@ -249,7 +249,7 @@ assert.equal(first.state.lastReadingListBackupFileName, 'shared/bok-reading-list
 assert.equal(first.state.lastSettingsBackupFileName, 'devices/personal/bok-settings.json');
 assert.equal(first.state.lastBackupFileName, 'shared/bok-bookmarks.json');
 assert.equal(first.state.lastArchiveBackupFileName, 'shared/bok-bookmark-archive.json');
-assert.equal(await readText(root, 'bok-saved-pages.json'), legacySavedPages);
+assert.equal(await readText(root, 'bok-saved-pages.json'), preexistingRootSavedPages);
 
 const firstClaim = JSON.parse(await readText(root, 'devices/personal/device.json'));
 assert.equal(firstClaim.deviceName, 'personal');
@@ -260,7 +260,15 @@ assert.equal(
   ],
   firstClaim.claimId,
 );
-assert.equal(JSON.parse(await readText(root, 'devices/personal/bok-saved-pages.json')).schemaVersion, 3);
+const savedPagesBackup = JSON.parse(
+  await readText(root, 'devices/personal/bok-saved-pages.json'),
+);
+assert.equal(savedPagesBackup.schemaVersion, 3);
+assert.deepEqual(Object.keys(savedPagesBackup).sort(), [
+  'revision',
+  'schemaVersion',
+  'sessions',
+]);
 const readingListBackup = JSON.parse(
   await readText(root, 'shared/bok-reading-list.json'),
 );

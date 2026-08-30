@@ -58,7 +58,7 @@ export interface SavedTab {
 | `directory` | `DirectoryPath \| null` | 唯一目录路径；`null` 表示用户尚未指定目录 |
 | `taskStatus` | `'todo' \| 'doing' \| 'done' \| null` | 标签页任务状态；`null` 表示普通标签页 |
 | `taskCompletedAt` | `number \| null` | 当前任务进入 `done` 的 Unix 毫秒时间戳；任务离开 `done` 或取消后为 `null` |
-| `archivedAt` | `number \| null` | 旧数据兼容字段；新的归档状态只读取标签组的 `archivedAt` |
+| `archivedAt` | `number \| null` | 标签页级保留字段；当前归档状态只读取 Session 或标签组的 `archivedAt` |
 
 ## 标签约束
 
@@ -267,7 +267,7 @@ Session。Group 锁定时不能删除该组或组内标签，也不能组内去�
 }
 ```
 
-## 存储、校验与旧数据兼容
+## 存储与校验
 
 数据保存在 `browser.storage.local` 的 `sessions` key 中。当前存储版本为 v3，
 顶层使用带版本号的 envelope，而不是直接保存数组：
@@ -288,52 +288,28 @@ Session。Group 锁定时不能删除该组或组内标签，也不能组内去�
 `1`、`3`、`7`、`30` 或 `"never"`。缺失或非法值回退为默认的 `7` 天；`30` 按
 30 × 24 小时计算，`"never"` 表示永不自动归档。
 
-旧版直接存储的 `SavedSession[]` 被视为 v0，v1/v2 envelope 也可正常读取。迁移时：
+首次安装时可以没有 `sessions` key；第一次保存或写入空列表时直接创建 schema v3
+envelope。除此之外，本地存储和 Saved pages JSON 导入都只接受 schema v3。裸数组、
+schema v1、schema v2 和其他非 v3 数据不会迁移，也不会覆盖原始 `sessions` 值；导入会在
+写入前整体拒绝，且不会生成 `sessionsImportBackup`。来自未来版本的数据同样停止读写，
+避免旧版本覆盖新格式。Bok 不再创建 `sessionsPreV3Snapshot`；已经存在的该 key 保持原样，
+不会由普通读写或导入自动删除。
 
-- v0/v1/v2 中每个 `grouped: false` 的旧普通分组都拆成一个仅含 direct tab items
-  的独立 Session，保留该组的标题、创建时间、标签顺序和状态。
-- 原 Session 中存在 direct tab 或 `grouped: true` 的真实 Chrome Group 时，它们仍按原顺序
-  保留在原 Session；只把旧普通分组分别拆出。
-- 真实 Chrome Group 写为 group item，`grouped` 固定为 `true`；迁移结果不保留
-  `layout`、`legacyGroups` 或运行期 groups proxy。
-
-第一次写成 v3 前，Bok 会把完整原始值保存到 `sessionsPreV3Snapshot`，
-已有快照不会被覆盖。旧版本
-扩展遇到 v3 时会停止读取和写入，避免覆盖较新的数据；重新升级到支持 v3 的版本后可继续使用。
-
-Saved pages 存储属于当前机器。不同机器可以分别保留 v1、v2 或 v3 备份；升级和首次写入
-互不影响。导入另一台机器的数据时，v1/v2 会先迁移到 v3，再按 session 合并，不会替换本机全部记录。
-
-读取 v0/v1/v2/v3 时会校验 session、item、group 和 tab 的完整结构、字段类型及 ID 唯一性。某条
+导入合法 v3 数据时按 Session 合并，不替换本机全部记录；写回合并结果前会把当前 v3 值保存到
+`sessionsImportBackup`。读取 v3 时会校验 session、item、group 和 tab 的完整结构、字段类型及
+全局 ID 唯一性。Group item 的 `grouped` 必须为 `true`，Session 必须使用 `items` 且不能包含
+`legacyGroups`；规范写入不会包含 `layout`、`groups` 或运行期 groups proxy。某条
 session 损坏时只跳过该条，其他有效 session 仍可使用；损坏原始数据、问题位置和
 发现时间会追加保存到 `browser.storage.local` 的 `sessionsRecovery` key，且同一份
 损坏数据不会重复写入。顶层结构损坏时无法安全拆分记录，因此会先保留整个原始值，
 再停止加载。恢复副本不会被普通的 Bok 操作自动删除；只要恢复副本仍存在，保存页
 就会持续提示，避免后台先完成隔离后用户不知道发生过异常。
 
-`libs/saved-pages/persistence.ts` 在读取时执行兼容转换：
-
-- 旧的 `"Dev/Tools"` 目录转换为 `["Dev", "Tools"]`
-- 缺失、空字符串或 `null` 目录转换为 `null`
-- 缺失或非法标签转换为空数组
-- 标签会去空、去重
-- Session 或组缺失、非 `true` 的 `locked` 和 `pinned` 转换为 `false`
-- Session 或组缺失的 `restoredAt` 和 `archivedAt` 转换为 `null`；需要严格
-  校验的字段遇到非 `null` 且非有限数字时按损坏记录隔离
-- 缺失或非法的组/标签页 `createdAt` 使用所属 session 或标签组的创建时间
-- 缺失或非法的组/标签页 `archivedAt` 转换为 `null`
-- 合法的 `taskStatus`（`todo`、`doing`、`done`）原样保留
-- 合法的 `taskCompletedAt` 只在对应 `taskStatus === "done"` 时保留；其余情况、
-  缺失值或非法值转换为 `null`，不会用当前时间伪造历史完成时间
-- 旧 `status: "in-progress"` 转换为 `taskStatus: "doing"`，
-  `status: "completed"` 转换为 `taskStatus: "done"`
-- 旧 `status: "not-started"`、缺失状态或非法状态转换为 `taskStatus: null`，
-  因为旧的“未开始”是默认值，不代表用户主动标记为任务
-- 后台启动时在恢复运行期映射后整理历史标签组名称，补齐空名称并按数字后缀消除重名；
-- 非 Chrome 支持值的 `color` 转换为 `undefined`
-
-兼容转换发生在读取时。下一次新增、修改或删除记录时，规范化后的有效数据会随
-schema v3 envelope 重新写入存储，并先按上述规则保留 `sessionsPreV3Snapshot`。
+合法 v3 数据读取后会规范化标签和目录中的空白、去除重复标签，并只保留 Chrome 支持的
+Group 颜色。`taskStatus` 只接受 `todo`、`doing`、`done` 或 `null`；
+`taskCompletedAt` 只在对应任务为 `done` 时保留。后台启动时在恢复运行期映射后整理标签组
+名称，补齐空名称并按数字后缀消除重名。下一次新增、修改或删除记录时，规范化后的有效
+数据仍以 schema v3 envelope 写回。
 
 ## 保存页操作与生命周期
 
@@ -397,7 +373,7 @@ schema v3 envelope 重新写入存储，并先按上述规则保留 `sessionsPre
 
 ## 保存网页的归档与组内去重
 
-- 归档与恢复不会删除数据，也不改写标签页的兼容归档字段。
+- 归档与恢复不会删除数据，也不改写标签页级的保留归档字段。
 - Session 和 Group 各自以自身的 `archivedAt` 作为归档状态唯一来源。保存页
   默认展示当前视图，归档视图展示已归档对象并提供恢复操作。
 - 手动归档不检查年龄、任务状态或固定状态。固定 Session 或 Group
@@ -452,7 +428,7 @@ Chrome 节点 ID 当作恢复后的稳定身份。只有固定归档文件写入
 
 1. `libs/saved-pages/model.ts` 中的核心类型定义
 2. `libs/saved-pages/save-tabs.ts` 中的新记录初始化
-3. `libs/saved-pages/persistence.ts` 中的旧数据兼容与读写逻辑
+3. `libs/saved-pages/persistence.ts` 中的 schema v3 校验与读写逻辑
 4. 保存记录页面的读取与编辑逻辑
 5. Chrome 书签同步和归档逻辑
 6. `pnpm compile`

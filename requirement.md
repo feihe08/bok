@@ -106,11 +106,12 @@
     同一组。恢复时取两边标签并集：保留 Chrome 当前顺序，Chrome 独有标签写入 Bok，
     Bok 独有标签追加到 Chrome 组。候选存在同分歧义时不自动恢复。重合率小于或等于
     50%（包括恰好 50%）时视为新标签组；若名称已占用，按数字后缀规则改名。
-15. 新保存记录使用 schema v3 items-only 结构，不写入 `layout`、`legacyGroups`
-    或运行期 groups proxy。旧 v0/v1/v2 中的 `grouped: false` 普通分组迁移为仅含
-    direct tab items 的独立 Session；混合记录中的真实 Chrome Group 保留在原 Session，
-    普通分组分别拆出。第一次写入 v3 前，必须把完整原始值保存到
-    `sessionsPreV3Snapshot`，且不覆盖已有快照。
+15. 新保存、持久化和导入只使用 schema v3 items-only 结构，不写入 `layout`、`groups`、
+    `legacyGroups` 或运行期 groups proxy；Group item 的 `grouped` 必须为 `true`。
+    首次安装缺少 `sessions` key 时直接创建 v3 空库。v0 裸数组、v1、v2 及其他非 v3
+    Saved pages 数据不迁移：本地读取停止且不覆盖原值，导入在写入前整体拒绝，不改变
+    当前记录，也不生成 `sessionsImportBackup`。未来版本同样停止读写以避免覆盖新格式。
+    不再创建 `sessionsPreV3Snapshot`，但普通读写和导入不得删除已经存在的该 key。
 
 功能2
 工具栏与右键菜单

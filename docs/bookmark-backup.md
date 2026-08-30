@@ -107,10 +107,9 @@ Saved pages 和当前设置按机器名称隔离；阅读列表、Chrome 书签�
 Group 只表示 `grouped: true` 的真实 Chrome 标签组并保留 `color`。文件不写入
 `layout`、`legacyGroups` 或运行期 groups proxy。
 
-v1/v2 备份仍可导入，但会在导入过程中迁移到 v3，不会以 legacy 结构继续操作。
-旧 `grouped: false` 普通分组各自变为仅含 direct tabs 的独立 Session；混合记录中的
-真实 Chrome Group 保留在原 Session 并维持可确定的原顺序。首次把本机旧数据写为
-v3 前，完整原始值保存在 `sessionsPreV3Snapshot`，不覆盖已有快照。
+Saved pages 导入只接受 schema v3。其他版本会在写入前整体拒绝，不改变当前保存记录，
+也不生成导入前备份。合法 v3 数据按 Session 合并；写回合并结果前，当前 v3 值保存在
+`sessionsImportBackup`，不会被导入文件整体替换。
 
 `bok-reading-list.json` 使用独立的 schema v1 envelope：
 

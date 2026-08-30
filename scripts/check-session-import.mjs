@@ -21,7 +21,6 @@ const tab = (id, taskStatus = null) => ({
 
 const firstStoredGroup = (stored) => {
   for (const session of stored.sessions.sessions) {
-    if (session.legacyGroups?.[0]) return session.legacyGroups[0];
     const item = session.items?.find((candidate) => candidate.type === 'group');
     if (item) return item.group;
   }
@@ -51,7 +50,6 @@ const session = (id, createdAt, groups) => ({
   taskStatus: null,
   taskCompletedAt: null,
   items: groups.map((group) => ({ type: 'group', group })),
-  groups,
 });
 const directSession = (id, createdAt, tabs) => ({
   id,
@@ -65,6 +63,9 @@ const directSession = (id, createdAt, tabs) => ({
   taskCompletedAt: null,
   items: tabs.map((savedTab) => ({ type: 'tab', tab: savedTab })),
 });
+const groupsInSession = (savedSession) => savedSession.items
+  .filter((item) => item.type === 'group')
+  .map((item) => item.group);
 const AUTO_ARCHIVE_AGE_MS = 7 * AUTO_ARCHIVE_DAY_MS;
 
 const existing = [session('existing', 20, [group('existing-group', 'WBS', 20)])];
@@ -76,8 +77,8 @@ const imported = [
 ];
 const merged = mergeImportedSessions(existing, imported);
 
-assert.equal(existing[0].groups[0].title, 'WBS');
-assert.equal(imported[0].groups[0].title, 'WBS');
+assert.equal(existing[0].items[0].group.title, 'WBS');
+assert.equal(imported[0].items[0].group.title, 'WBS');
 assert.equal(
   merged.sessions[1].items.find((item) => item.type === 'group').group.title,
   'WBS 1',
@@ -584,7 +585,7 @@ assert.deepEqual(
   { archivedSessions: 0, archivedGroups: 3 },
 );
 assert.deepEqual(
-  archiveCandidates.groups
+  groupsInSession(archiveCandidates)
     .filter((item) => item.archivedAt === now)
     .map((item) => item.id),
   ['older-than-a-week', 'done-group', 'done-tab'],
@@ -651,7 +652,7 @@ assert.deepEqual(
   { archivedSessions: 0, archivedGroups: 1 },
 );
 assert.deepEqual(
-  restoreAgeCandidates.groups
+  groupsInSession(restoreAgeCandidates)
     .filter((item) => item.archivedAt === now)
     .map((item) => item.id),
   ['restored-over-a-week'],
@@ -668,7 +669,7 @@ for (const period of [1, 3, 7, 30]) {
     { archivedSessions: 0, archivedGroups: 1 },
   );
   assert.deepEqual(
-    periodCandidates.groups
+    groupsInSession(periodCandidates)
       .filter((item) => item.archivedAt === periodNow)
       .map((item) => item.id),
     [`period-${period}-over`],
@@ -719,7 +720,6 @@ const {
   getSessions,
   importSessionsJson,
   readSessions,
-  SESSIONS_PRE_V3_SNAPSHOT_KEY,
   writeSessions,
 } = await import(
   '../libs/saved-pages/persistence.ts'
@@ -789,28 +789,37 @@ assert.equal(
   false,
 );
 await fakeBrowser.storage.local.clear();
+const existingPreV3Snapshot = { preserved: true };
+await fakeBrowser.storage.local.set({
+  sessionsPreV3Snapshot: existingPreV3Snapshot,
+});
 await writeSessions([]);
-assert.equal(
-  SESSIONS_PRE_V3_SNAPSHOT_KEY in (await fakeBrowser.storage.local.get(null)),
-  false,
-);
+const initializedStorage = await fakeBrowser.storage.local.get([
+  'sessions',
+  'sessionsPreV3Snapshot',
+]);
+assert.deepEqual(initializedStorage.sessions, {
+  schemaVersion: 3,
+  revision: 1,
+  sessions: [],
+});
+assert.deepEqual(initializedStorage.sessionsPreV3Snapshot, existingPreV3Snapshot);
 await fakeBrowser.storage.local.clear();
 
 const storageNow = Date.now();
 const storageCreatedAt = storageNow - AUTO_ARCHIVE_AGE_MS - 1;
 const storageSessionId = 'storage-session';
 const storageGroupId = 'storage-group';
-const legacyStoredGroup = group(storageGroupId, 'Storage group', storageCreatedAt, {
+const storedArchiveGroup = group(storageGroupId, 'Storage group', storageCreatedAt, {
   archivedAt: storageNow - 1,
 });
-delete legacyStoredGroup.restoredAt;
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 1,
+    schemaVersion: 3,
     revision: 0,
     sessions: [
       session(storageSessionId, storageCreatedAt, [
-        legacyStoredGroup,
+        storedArchiveGroup,
       ]),
     ],
   },
@@ -863,7 +872,7 @@ assert.equal(storedGroup.restoredAt, restoredAt);
 
 const importNow = Date.now();
 const periodImportJson = JSON.stringify({
-  schemaVersion: 1,
+  schemaVersion: 3,
   revision: 0,
   sessions: [
     session('period-import-session', importNow, [
@@ -876,7 +885,7 @@ const periodImportJson = JSON.stringify({
   ],
 });
 const directPeriodImportJson = JSON.stringify({
-  schemaVersion: 2,
+  schemaVersion: 3,
   revision: 0,
   sessions: [
     directSession(
@@ -923,103 +932,6 @@ assert.equal(periodImportResult.archivedGroups, 1);
 stored = await fakeBrowser.storage.local.get('sessions');
 assert.equal(typeof firstStoredGroup(stored).archivedAt, 'number');
 
-const emptyOrdinaryState = {
-  grouped: false,
-  locked: true,
-  pinned: true,
-  restoredAt: 7,
-  archivedAt: 8,
-  taskStatus: 'done',
-  taskCompletedAt: 9,
-  tabs: [],
-};
-
-fakeBrowser.reset();
-await setSavedPagesAutoArchivePeriod('never');
-await writeSessions([
-  session('v1-empty-conflict-holder', 1, [
-    group('v1-empty-session', 'Source ID conflict', 1),
-    group(
-      'v1-empty-session:bok-imported-session',
-      'Candidate ID conflict',
-      1,
-    ),
-  ]),
-]);
-const v1EmptyImportResult = await importSessionsJson(JSON.stringify({
-  schemaVersion: 1,
-  revision: 0,
-  sessions: [
-    session('v1-empty-session', 1, [
-      {
-        ...group('v1-empty-ordinary', 'V1 empty ordinary', 2),
-        ...emptyOrdinaryState,
-      },
-    ]),
-  ],
-}));
-assert.equal(v1EmptyImportResult.importedSessions, 1);
-assert.equal(v1EmptyImportResult.importedGroups, 0);
-assert.equal(v1EmptyImportResult.importedTabs, 0);
-let emptyImportedSession = (await getSessions()).find(
-  (candidate) => candidate.id === 'v1-empty-session:bok-imported-session-1',
-);
-assert.deepEqual(emptyImportedSession.items, []);
-assert.deepEqual(
-  {
-    title: emptyImportedSession.title,
-    locked: emptyImportedSession.locked,
-    pinned: emptyImportedSession.pinned,
-    restoredAt: emptyImportedSession.restoredAt,
-    archivedAt: emptyImportedSession.archivedAt,
-    taskStatus: emptyImportedSession.taskStatus,
-    taskCompletedAt: emptyImportedSession.taskCompletedAt,
-  },
-  {
-    title: 'V1 empty ordinary',
-    locked: true,
-    pinned: true,
-    restoredAt: 7,
-    archivedAt: 8,
-    taskStatus: 'done',
-    taskCompletedAt: 9,
-  },
-);
-
-fakeBrowser.reset();
-await setSavedPagesAutoArchivePeriod('never');
-await writeSessions([
-  session('v2-empty-conflict-holder', 1, [
-    group('v2-empty-conflict-group', 'Nested tab ID conflict', 1, {
-      tabs: [tab('v2-empty-session')],
-    }),
-  ]),
-]);
-const v2EmptyImportResult = await importSessionsJson(JSON.stringify({
-  schemaVersion: 2,
-  revision: 0,
-  sessions: [{
-    id: 'v2-empty-session',
-    createdAt: 1,
-    items: [{
-      type: 'group',
-      group: {
-        ...group('v2-empty-ordinary', 'V2 empty ordinary', 2),
-        ...emptyOrdinaryState,
-      },
-    }],
-  }],
-}));
-assert.equal(v2EmptyImportResult.importedSessions, 1);
-assert.equal(v2EmptyImportResult.importedGroups, 0);
-assert.equal(v2EmptyImportResult.importedTabs, 0);
-emptyImportedSession = (await getSessions()).find(
-  (candidate) => candidate.id === 'v2-empty-session:bok-imported-session',
-);
-assert.deepEqual(emptyImportedSession.items, []);
-assert.equal(emptyImportedSession.title, 'V2 empty ordinary');
-assert.equal(emptyImportedSession.locked, true);
-
 fakeBrowser.reset();
 await setSavedPagesAutoArchivePeriod('never');
 await writeSessions([
@@ -1047,7 +959,7 @@ assert.equal(v3EmptyImportResult.importedTabs, 0);
 const v3EmptyRemappedId =
   'tab:v3-existing-direct:bok-imported-session';
 let v3StoredSessions = await getSessions();
-emptyImportedSession = v3StoredSessions.find(
+let emptyImportedSession = v3StoredSessions.find(
   (candidate) => candidate.id === v3EmptyRemappedId,
 );
 assert.deepEqual(emptyImportedSession, {
@@ -1075,7 +987,7 @@ await setSavedPagesAutoArchivePeriod(7);
 const immediateArchiveNow = Date.now();
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 1,
+    schemaVersion: 3,
     revision: 0,
     sessions: [
       session('immediate-archive-session', immediateArchiveNow, [
@@ -1094,79 +1006,132 @@ stored = await fakeBrowser.storage.local.get('sessions');
 assert.equal(typeof firstStoredGroup(stored).archivedAt, 'number');
 
 fakeBrowser.reset();
-const v0RawSessions = [
-  {
-    id: 'minimal-v0-session',
-    createdAt: 50,
-    groups: [
-      {
-        id: 'minimal-v0-group',
-        tabs: [{ id: 'minimal-v0-tab', url: 'https://minimal-v0.example' }],
-      },
-    ],
-  },
-];
-await fakeBrowser.storage.local.set({ sessions: v0RawSessions });
-const minimalV0 = await getSessions();
-assert.equal(minimalV0.length, 1);
-assert.equal(minimalV0[0].id, 'minimal-v0-session');
-assert.equal(minimalV0[0].title, '');
-assert.equal(minimalV0[0].locked, false);
-assert.equal(minimalV0[0].items[0].type, 'tab');
-assert.deepEqual(minimalV0[0].items[0].tab, {
-  id: 'minimal-v0-tab',
-  url: 'https://minimal-v0.example',
-  title: 'https://minimal-v0.example',
-  favIconUrl: undefined,
-  createdAt: 50,
-  updatedAt: 50,
-  archivedAt: null,
-  tags: [],
-  directory: null,
-  taskStatus: null,
-  taskCompletedAt: null,
+for (const [label, raw, error] of [
+  ['v0', [{ id: 'v0-session', createdAt: 1, groups: [] }], /数据版本为 v0.*只支持 v3/],
+  ['v1', { schemaVersion: 1, revision: 0, sessions: [] }, /数据版本为 v1.*只支持 v3/],
+  ['v2', { schemaVersion: 2, revision: 0, sessions: [] }, /数据版本为 v2.*只支持 v3/],
+]) {
+  fakeBrowser.reset();
+  await fakeBrowser.storage.local.set({ sessions: raw });
+  await assert.rejects(
+    () => getSessions(),
+    error,
+    `${label} local storage must be rejected`,
+  );
+  await assert.rejects(
+    () => writeSessions([]),
+    error,
+    `${label} local storage must block writes`,
+  );
+  const blockedState = await fakeBrowser.storage.local.get(null);
+  assert.deepEqual(blockedState.sessions, raw, `${label} storage must stay unchanged`);
+  assert.equal(blockedState.sessionsRecovery, undefined);
+  assert.equal(blockedState.sessionsPreV3Snapshot, undefined);
+}
+
+fakeBrowser.reset();
+await writeSessions([directSession('local-v3', 1, [tab('local-v3-tab')])]);
+const stateBeforeUnsupportedImports = await fakeBrowser.storage.local.get([
+  'sessions',
+  'sessionsImportBackup',
+  'sessionsPreV3Snapshot',
+]);
+for (const [label, raw, error] of [
+  ['v0', [], /数据版本为 v0.*只支持 v3/],
+  ['v1', { schemaVersion: 1, revision: 0, sessions: [] }, /数据版本为 v1.*只支持 v3/],
+  ['v2', { schemaVersion: 2, revision: 0, sessions: [] }, /数据版本为 v2.*只支持 v3/],
+]) {
+  await assert.rejects(
+    () => importSessionsJson(JSON.stringify(raw)),
+    error,
+  );
+  assert.deepEqual(
+    await fakeBrowser.storage.local.get([
+      'sessions',
+      'sessionsImportBackup',
+      'sessionsPreV3Snapshot',
+    ]),
+    stateBeforeUnsupportedImports,
+    `${label} import must not write data or an import backup`,
+  );
+}
+
+fakeBrowser.reset();
+await setSavedPagesAutoArchivePeriod('never');
+const retainedPreV3Snapshot = { original: 'retained' };
+await fakeBrowser.storage.local.set({
+  sessionsPreV3Snapshot: retainedPreV3Snapshot,
 });
-
-fakeBrowser.reset();
-const v1Envelope = {
-  schemaVersion: 1,
-  revision: 4,
-  sessions: [session('legacy-v1', 1, [group('legacy-group', 'Legacy', 1)])],
-};
-await fakeBrowser.storage.local.set({ sessions: v1Envelope });
-const legacySessions = await getSessions();
-assert.ok(Array.isArray(legacySessions[0].items));
-await writeSessions(legacySessions);
-stored = await fakeBrowser.storage.local.get(['sessions', SESSIONS_PRE_V3_SNAPSHOT_KEY]);
-assert.deepEqual(stored[SESSIONS_PRE_V3_SNAPSHOT_KEY], v1Envelope);
-assert.equal(stored.sessions.schemaVersion, 3);
-assert.ok(Array.isArray(stored.sessions.sessions[0].items));
-assert.equal('groups' in stored.sessions.sessions[0], false);
-await fakeBrowser.storage.local.set({ [SESSIONS_PRE_V3_SNAPSHOT_KEY]: { preserved: true } });
-await writeSessions(await getSessions());
+await writeSessions([
+  directSession('protected-current', 1, [tab('protected-current-tab')]),
+]);
+const sessionsBeforeSuccessfulImport = (
+  await fakeBrowser.storage.local.get('sessions')
+).sessions;
+const successfulImport = await importSessionsJson(JSON.stringify({
+  schemaVersion: 3,
+  revision: 0,
+  sessions: [session('successful-import', 2, [
+    group('successful-import-group', 'Imported', 2),
+  ])],
+}));
+assert.equal(successfulImport.importedSessions, 1);
+const protectedState = await fakeBrowser.storage.local.get([
+  'sessions',
+  'sessionsImportBackup',
+  'sessionsPreV3Snapshot',
+]);
 assert.deepEqual(
-  (await fakeBrowser.storage.local.get(SESSIONS_PRE_V3_SNAPSHOT_KEY))[SESSIONS_PRE_V3_SNAPSHOT_KEY],
-  { preserved: true },
+  protectedState.sessionsImportBackup.value,
+  sessionsBeforeSuccessfulImport,
 );
+assert.equal(typeof protectedState.sessionsImportBackup.capturedAt, 'number');
+assert.deepEqual(protectedState.sessionsPreV3Snapshot, retainedPreV3Snapshot);
+assert.equal(protectedState.sessions.sessions.length, 2);
 
 fakeBrowser.reset();
+const normalizationTab = {
+  ...tab('normalized-tab', 'doing'),
+  tags: [' alpha ', 'alpha', '', 'beta'],
+  directory: [' Dev ', ' Tools '],
+  taskCompletedAt: 123,
+};
+const normalizationGroup = {
+  ...group('normalized-group', 'Normalized', 1, { tabs: [normalizationTab] }),
+  status: 'completed',
+  taskStatus: 'doing',
+  taskCompletedAt: 456,
+};
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 2,
-    revision: 1,
-    sessions: [
-      {
-        id: 'ordered-v2',
-        createdAt: 10,
-        items: [
-          { type: 'tab', tab: tab('first-direct') },
-          { type: 'group', group: group('middle-group', 'Middle', 2) },
-          { type: 'tab', tab: tab('last-direct') },
-        ],
-      },
-    ],
+    schemaVersion: 3,
+    revision: 7,
+    sessions: [session('normalization-session', 1, [normalizationGroup])],
   },
 });
+const normalizedEnvelope = JSON.parse(await exportSessionsJson());
+const normalizedGroup = normalizedEnvelope.sessions[0].items[0].group;
+assert.equal('status' in normalizedGroup, false);
+assert.equal(normalizedGroup.taskStatus, 'doing');
+assert.equal(normalizedGroup.taskCompletedAt, null);
+assert.deepEqual(normalizedGroup.tabs[0].tags, ['alpha', 'beta']);
+assert.deepEqual(normalizedGroup.tabs[0].directory, ['Dev', 'Tools']);
+assert.equal(normalizedGroup.tabs[0].taskCompletedAt, null);
+
+fakeBrowser.reset();
+const orderedV3Envelope = {
+  schemaVersion: 3,
+  revision: 1,
+  sessions: [{
+    ...directSession('ordered-v3', 10, []),
+    items: [
+      { type: 'tab', tab: tab('first-direct') },
+      { type: 'group', group: group('middle-group', 'Middle', 2) },
+      { type: 'tab', tab: tab('last-direct') },
+    ],
+  }],
+};
+await fakeBrowser.storage.local.set({ sessions: orderedV3Envelope });
 const orderedSessions = await getSessions();
 assert.deepEqual(
   orderedSessions[0].items.map((item) =>
@@ -1181,7 +1146,6 @@ assert.deepEqual(
 await writeSessions(await getSessions());
 stored = await fakeBrowser.storage.local.get('sessions');
 assert.equal(stored.sessions.schemaVersion, 3);
-assert.equal('groups' in stored.sessions.sessions[0], false);
 assert.deepEqual(
   stored.sessions.sessions[0].items.map((item) => item.type),
   ['tab', 'group', 'tab'],
@@ -1193,12 +1157,11 @@ const orderedV3Json = JSON.stringify(stored.sessions);
 fakeBrowser.reset();
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 1,
     sessions: [
       {
-        id: 'direct-operations',
-        createdAt: 10,
+        ...directSession('direct-operations', 10, []),
         items: [
           { type: 'tab', tab: tab('direct-task') },
           { type: 'group', group: group('direct-operations-group', 'Group', 2) },
@@ -1230,12 +1193,11 @@ assert.equal(stored.sessions.sessions[0].items[0].tab.id, 'direct-task');
 
 fakeBrowser.reset();
 const proxyIdCollisionEnvelope = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   revision: 1,
   sessions: [
     {
-      id: 'proxy-id-collision',
-      createdAt: 10,
+      ...directSession('proxy-id-collision', 10, []),
       items: [
         { type: 'tab', tab: tab('same-id') },
         { type: 'group', group: group('tab:same-id', 'Collision', 2) },
@@ -1255,15 +1217,9 @@ assert.deepEqual(
 fakeBrowser.reset();
 await setSavedPagesAutoArchivePeriod('never');
 const directOnlyImportJson = JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 0,
-    sessions: [
-      {
-        id: 'direct-only-v2',
-        createdAt: 10,
-        items: [{ type: 'tab', tab: tab('direct-import') }],
-      },
-    ],
+    sessions: [directSession('direct-only-v3', 10, [tab('direct-import')])],
   });
 const directImportResult = await importSessionsJson(directOnlyImportJson);
 assert.equal(directImportResult.importedSessions, 1);
@@ -1279,7 +1235,7 @@ assert.equal((await getSessions())[0].items[0].tab.id, directStoredId);
 await importSessionsJson(orderedV3Json);
 stored = await fakeBrowser.storage.local.get('sessions');
 assert.deepEqual(
-  stored.sessions.sessions.find((item) => item.id === 'ordered-v2').items.map((item) => item.type),
+  stored.sessions.sessions.find((item) => item.id === 'ordered-v3').items.map((item) => item.type),
   ['tab', 'group', 'tab'],
 );
 
@@ -1287,21 +1243,17 @@ fakeBrowser.reset();
 await setSavedPagesAutoArchivePeriod('never');
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 1,
+    schemaVersion: 3,
     revision: 0,
-    sessions: [session('same-session', 1, [group('legacy-same', 'Legacy', 1)])],
+    sessions: [session('same-session', 1, [group('existing-group', 'Existing', 1)])],
   },
 });
 await importSessionsJson(
   JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 0,
     sessions: [
-      {
-        id: 'same-session',
-        createdAt: 2,
-        items: [{ type: 'tab', tab: tab('direct-after-conflict') }],
-      },
+      directSession('same-session', 2, [tab('direct-after-conflict')]),
     ],
   }),
 );
@@ -1316,23 +1268,17 @@ fakeBrowser.reset();
 await setSavedPagesAutoArchivePeriod('never');
 await fakeBrowser.storage.local.set({
   sessions: {
-    schemaVersion: 2,
+    schemaVersion: 3,
     revision: 0,
-    sessions: [
-      {
-        id: 'same-session-reverse',
-        createdAt: 2,
-        items: [{ type: 'tab', tab: tab('direct-before-conflict') }],
-      },
-    ],
+    sessions: [directSession('same-session-reverse', 2, [tab('direct-before-conflict')])],
   },
 });
 await importSessionsJson(
   JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 3,
     revision: 0,
     sessions: [
-      session('same-session-reverse', 1, [group('legacy-after-conflict', 'Legacy', 1)]),
+      session('same-session-reverse', 1, [group('imported-group', 'Imported', 1)]),
     ],
   }),
 );
@@ -1342,95 +1288,6 @@ assert.deepEqual(stored.sessions.sessions[0].items.map((item) => item.type), [
   'tab',
   'group',
 ]);
-
-fakeBrowser.reset();
-const ordinaryFirst = {
-  ...group('ordinary-first', 'Ordinary first', 11, {
-    pinned: true,
-    taskStatus: 'doing',
-  }),
-  grouped: false,
-  locked: true,
-  archivedAt: 9,
-  restoredAt: 10,
-};
-const ordinaryLast = {
-  ...group('ordinary-last', 'Ordinary last', 12),
-  grouped: false,
-};
-const mixedLegacyEnvelope = {
-  schemaVersion: 1,
-  revision: 3,
-  sessions: [
-    session('mixed-legacy-session', 20, [
-      ordinaryFirst,
-      group('real-legacy-group', 'Real', 20),
-      ordinaryLast,
-    ]),
-  ],
-};
-await fakeBrowser.storage.local.set({ sessions: mixedLegacyEnvelope });
-const migratedLegacy = await getSessions();
-assert.equal(migratedLegacy.length, 3);
-assert.equal(migratedLegacy[0].id, 'mixed-legacy-session');
-assert.deepEqual(migratedLegacy[0].items.map((item) => item.type), ['group']);
-assert.equal(migratedLegacy[1].id, 'ordinary-first');
-assert.equal(migratedLegacy[1].title, 'Ordinary first');
-assert.equal(migratedLegacy[1].locked, true);
-assert.equal(migratedLegacy[1].pinned, true);
-assert.equal(migratedLegacy[1].archivedAt, 9);
-assert.equal(migratedLegacy[1].restoredAt, 10);
-assert.equal(migratedLegacy[1].taskStatus, 'doing');
-assert.deepEqual(migratedLegacy[1].items.map((item) => item.type), ['tab']);
-assert.equal(migratedLegacy[2].id, 'ordinary-last');
-await writeSessions(migratedLegacy);
-stored = await fakeBrowser.storage.local.get(['sessions', SESSIONS_PRE_V3_SNAPSHOT_KEY]);
-assert.deepEqual(stored[SESSIONS_PRE_V3_SNAPSHOT_KEY], mixedLegacyEnvelope);
-assert.equal(stored.sessions.schemaVersion, 3);
-assert.ok(
-  stored.sessions.sessions.every(
-    (savedSession) =>
-      !('legacyGroups' in savedSession) &&
-      savedSession.items.every(
-        (item) => item.type !== 'group' || item.group.grouped === true,
-      ),
-  ),
-);
-
-fakeBrowser.reset();
-const ordinaryProxyCollisionEnvelope = {
-  schemaVersion: 1,
-  revision: 0,
-  sessions: [
-    session('ordinary-proxy-parent', 1, [
-      {
-        ...group('ordinary-proxy-group', 'Ordinary', 1, {
-          tabs: [tab('proxy-source-tab')],
-        }),
-        grouped: false,
-      },
-      group('tab:proxy-source-tab', 'Real group collision', 2),
-    ]),
-  ],
-};
-await fakeBrowser.storage.local.set({ sessions: ordinaryProxyCollisionEnvelope });
-const migratedProxyCollision = await readSessions();
-assert.equal(migratedProxyCollision.sessions.length, 2);
-assert.equal(migratedProxyCollision.recoveryEntryCount, 0);
-const migratedDirectSession = migratedProxyCollision.sessions.find((candidate) =>
-  candidate.items.some((item) => item.type === 'tab'),
-);
-assert.equal(migratedDirectSession.items[0].tab.id, 'proxy-source-tab:migrated');
-await writeSessions(migratedProxyCollision.sessions);
-const rereadProxyCollision = await readSessions();
-assert.equal(rereadProxyCollision.sessions.length, 2);
-assert.equal(rereadProxyCollision.recoveryEntryCount, 0);
-assert.equal(
-  rereadProxyCollision.sessions
-    .find((candidate) => candidate.items.some((item) => item.type === 'tab'))
-    .items[0].tab.id,
-  'proxy-source-tab:migrated',
-);
 
 fakeBrowser.reset();
 await assert.rejects(
@@ -1446,30 +1303,45 @@ await assert.rejects(
 );
 
 fakeBrowser.reset();
-const legacySessionIdCollision = {
-  schemaVersion: 1,
+await assert.rejects(
+  () => importSessionsJson(JSON.stringify({
+    schemaVersion: 3,
+    revision: 0,
+    sessions: [session('invalid-ordinary-group', 1, [
+      { ...group('ordinary-group', 'Ordinary', 1), grouped: false },
+    ])],
+  })),
+  /grouped 必须为 true/,
+);
+
+fakeBrowser.reset();
+const v3SessionIdCollision = {
+  schemaVersion: 3,
   revision: 0,
   sessions: [
-    session('legacy-parent', 1, [
-      { ...group('another-session', 'Ordinary', 1), grouped: false },
+    session('collision-parent', 1, [
+      group('another-session', 'Real group', 1),
     ]),
-    session('another-session', 2, [group('real-group', 'Real', 2)]),
+    session('another-session', 2, [group('second-real-group', 'Second', 2)]),
   ],
 };
-await fakeBrowser.storage.local.set({ sessions: legacySessionIdCollision });
-const collisionMigration = await readSessions();
-assert.equal(collisionMigration.sessions.length, 1);
-assert.equal(collisionMigration.recoveryEntryCount, 1);
+await fakeBrowser.storage.local.set({ sessions: v3SessionIdCollision });
+const collisionRecovery = await readSessions();
+assert.equal(collisionRecovery.sessions.length, 1);
+assert.equal(collisionRecovery.recoveryEntryCount, 1);
 assert.deepEqual(
   (await fakeBrowser.storage.local.get('sessions')).sessions,
-  legacySessionIdCollision,
+  v3SessionIdCollision,
 );
 
 fakeBrowser.reset();
 await setSavedPagesAutoArchivePeriod(7);
-await fakeBrowser.storage.local.set({
-  sessions: { schemaVersion: 999, revision: 0, sessions: [] },
-});
-await assert.rejects(() => setAutoArchivePeriod(1), /Bok 数据来自更新版本/);
+const futureEnvelope = { schemaVersion: 999, revision: 0, sessions: [] };
+await fakeBrowser.storage.local.set({ sessions: futureEnvelope });
+await assert.rejects(() => setAutoArchivePeriod(1), /数据版本为 v999.*只支持 v3/);
 assert.equal(await getSavedPagesAutoArchivePeriod(), 7);
+assert.deepEqual(
+  (await fakeBrowser.storage.local.get('sessions')).sessions,
+  futureEnvelope,
+);
 console.log('session import check passed');
